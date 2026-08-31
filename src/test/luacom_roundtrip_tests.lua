@@ -99,6 +99,32 @@ assert(epoch_result.Minute == automation_epoch.Minute)
 assert(epoch_result.Second == automation_epoch.Second)
 assert(epoch_result.Milliseconds == automation_epoch.Milliseconds)
 
+local function assert_historical_milliseconds(year, milliseconds)
+  local value = {
+    Year = year,
+    Month = 1,
+    Day = 2,
+    Hour = 0,
+    Minute = 0,
+    Second = 0,
+    Milliseconds = milliseconds,
+  }
+  local result = luacom.RoundTrip(value)
+  assert(result.Year == value.Year)
+  assert(result.Month == value.Month)
+  assert(result.Day == value.Day)
+  assert(result.Hour == value.Hour)
+  assert(result.Minute == value.Minute)
+  assert(result.Second == value.Second)
+  assert(result.Milliseconds == value.Milliseconds)
+end
+
+for _, year in ipairs({100, 1600}) do
+  for _, milliseconds in ipairs({499, 500, 999}) do
+    assert_historical_milliseconds(year, milliseconds)
+  end
+end
+
 luacom.DateFormat = "string_ms_accurate"
 date.Second = 59
 date.Milliseconds = 499
@@ -110,6 +136,19 @@ assert(type(formatted_after_boundary) == "string")
 assert(#formatted_before_boundary > 0)
 assert(#formatted_after_boundary > 0)
 assert(formatted_before_boundary ~= formatted_after_boundary)
+
+for _, year in ipairs({100, 1600}) do
+  date.Year = year
+  date.Month = 1
+  date.Day = 2
+  date.Hour = 0
+  date.Minute = 0
+  date.Second = 0
+  date.Milliseconds = 500
+  assert(#luacom.RoundTrip(date) > 0)
+  date.Milliseconds = 999
+  assert(#luacom.RoundTrip(date) > 0)
+end
 
 luacom.SetCodepage(original_code_page)
 assert(luacom.GetCodepage() == original_code_page)

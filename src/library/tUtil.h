@@ -36,6 +36,7 @@ public:
   static tStringBuffer RegistryGetString(lua_State* L, const char& Key);
   static BOOL VariantTimeToSystemTimeWithMilliseconds(double variant_time, SYSTEMTIME* system_time);
   static BOOL SystemTimeToVariantTimeWithMilliseconds(SYSTEMTIME system_time, double* variant_time);
+  static BOOL RoundSystemTimeToNearestSecond(SYSTEMTIME* system_time);
 
   static FILE* log_file;
 };

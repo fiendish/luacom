@@ -142,27 +142,6 @@ bool pushLuaDispatchIfSameState(lua_State* L, IUnknown* object)
   return SUCCEEDED(hr) && SUCCEEDED(lua_dispatch->PushIfSameState(L));
 }
 
-bool roundSystemTimeToNearestSecond(SYSTEMTIME* value)
-{
-  if(value->wMilliseconds < 500)
-  {
-    value->wMilliseconds = 0;
-    return true;
-  }
-
-  FILETIME file_time;
-  if(!SystemTimeToFileTime(value, &file_time))
-    return false;
-
-  ULARGE_INTEGER ticks;
-  ticks.LowPart = file_time.dwLowDateTime;
-  ticks.HighPart = file_time.dwHighDateTime;
-  ticks.QuadPart += static_cast<ULONGLONG>(1000 - value->wMilliseconds) * 10000;
-  file_time.dwLowDateTime = ticks.LowPart;
-  file_time.dwHighDateTime = ticks.HighPart;
-
-  return FileTimeToSystemTime(&file_time, value) != FALSE;
-}
 }
 
 
@@ -354,8 +333,26 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
             SYSTEMTIME date;
             if(!tUtil::VariantTimeToSystemTimeWithMilliseconds(varg.date, &date))
               COM_ERROR("Cannot convert COM date to system time.");
-            if(!roundSystemTimeToNearestSecond(&date))
+            if(!tUtil::RoundSystemTimeToNearestSecond(&date))
               COM_ERROR(tUtil::GetErrorMessage(GetLastError()));
+
+            if(date.wYear < 1601)
+            {
+              double rounded_date;
+              if(!tUtil::SystemTimeToVariantTimeWithMilliseconds(
+                   date, &rounded_date))
+                COM_ERROR("Cannot convert system time to COM date.");
+
+              VARIANTARG rounded_varg;
+              VariantInit(&rounded_varg);
+              rounded_varg.vt = VT_DATE;
+              rounded_varg.date = rounded_date;
+              HRESULT hr = VariantChangeType(
+                &new_varg, &rounded_varg, 0, VT_BSTR);
+              CHK_COM_CODE(hr);
+              lua_pushstring(L, tUtil::bstr2string(new_varg.bstrVal));
+              break;
+            }
 
             const int date_length = GetDateFormatW(
               LOCALE_USER_DEFAULT, DATE_SHORTDATE, &date, NULL, NULL, 0);
