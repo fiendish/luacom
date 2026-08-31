@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <process.h>  // spawnlp
 #include <limits.h>
+#include <math.h>
 
 #include "tUtil.h"
 #include "tLuaCOMException.h"
@@ -26,9 +27,9 @@ extern "C"
 // - while Cygwin default convert filename internally to UTF-8
 // - we have to use ASCII format for our lua source code, if you prefer UTF-8, you need luaiconv to convert UTF-8 to your ASCII format (GBK or other)
 #ifdef __CYGWIN__
-UINT code_page=CP_UTF8; // By default, Cygwin internally convert filename to UTF-8
+LUACOM_THREAD_LOCAL UINT code_page=CP_UTF8; // By default, Cygwin internally convert filename to UTF-8
 #else
-UINT code_page=CP_ACP;
+LUACOM_THREAD_LOCAL UINT code_page=CP_ACP;
 #endif
 
 FILE* tUtil::log_file = NULL;
@@ -333,4 +334,69 @@ tStringBuffer tUtil::RegistryGetString(lua_State* L, const char& Key)
 	lua_pushlightuserdata(L, (void *)&Key);  /* push address */ 
     lua_gettable(L, LUA_REGISTRYINDEX);  /* retrieve value */ 
     return tStringBuffer(lua_tostring(L, -1));  /* convert to string */
+}
+
+BOOL tUtil::VariantTimeToSystemTimeWithMilliseconds(
+  double variant_time,
+  SYSTEMTIME* system_time)
+{
+  if(system_time == NULL)
+    return FALSE;
+
+  if(!VariantTimeToSystemTime(variant_time, system_time))
+    return FALSE;
+
+  double whole_days = 0.0;
+  double fraction = modf(variant_time, &whole_days);
+  if(fraction < 0.0)
+    fraction = -fraction;
+
+  double milliseconds = fraction * 24.0 * 60.0 * 60.0 * 1000.0;
+  milliseconds -= floor(milliseconds / 1000.0) * 1000.0;
+  milliseconds = floor(milliseconds + 0.5);
+
+  if(milliseconds >= 1000.0)
+    milliseconds = 0.0;
+  else if(milliseconds >= 500.0)
+  {
+    FILETIME file_time;
+    if(!SystemTimeToFileTime(system_time, &file_time))
+      return FALSE;
+
+    ULARGE_INTEGER ticks;
+    ticks.LowPart = file_time.dwLowDateTime;
+    ticks.HighPart = file_time.dwHighDateTime;
+    if(ticks.QuadPart < 10000000)
+      return FALSE;
+    ticks.QuadPart -= 10000000;
+    file_time.dwLowDateTime = ticks.LowPart;
+    file_time.dwHighDateTime = ticks.HighPart;
+
+    if(!FileTimeToSystemTime(&file_time, system_time))
+      return FALSE;
+  }
+
+  system_time->wMilliseconds = static_cast<WORD>(milliseconds);
+  return TRUE;
+}
+
+BOOL tUtil::SystemTimeToVariantTimeWithMilliseconds(
+  SYSTEMTIME system_time,
+  double* variant_time)
+{
+  if(variant_time == NULL)
+    return FALSE;
+
+  const WORD milliseconds = system_time.wMilliseconds;
+  system_time.wMilliseconds = 0;
+
+  double whole_seconds = 0.0;
+  if(!SystemTimeToVariantTime(&system_time, &whole_seconds))
+    return FALSE;
+
+  const double fraction = milliseconds / (24.0 * 60.0 * 60.0 * 1000.0);
+  *variant_time = whole_seconds < 0.0
+    ? whole_seconds - fraction
+    : whole_seconds + fraction;
+  return TRUE;
 }

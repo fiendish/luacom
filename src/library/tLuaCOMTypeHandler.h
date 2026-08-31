@@ -43,6 +43,8 @@ public:
   void releaseVariant(VARIANTARG *pvarg, bool release_memory=true);
 
   void pushTableVarNumber(lua_State *L, VARTYPE vt, double val);
+  void pushTableVarInteger(lua_State *L, VARTYPE vt, LONGLONG val);
+  void pushTableVarUnsignedInteger(lua_State *L, VARTYPE vt, ULONGLONG val);
 
   int pushOutValues(lua_State* L, const DISPPARAMS& dispparams, const FUNCDESC* pfuncdesc);
 

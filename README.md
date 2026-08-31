@@ -17,6 +17,7 @@ The following "ahead" branches have been merged into this master:
 *   **[udbg/luacom](https://github.com/udbg/luacom) (+1 commit):** Added modern **xmake** build system support.
 *   **[shere-avintec/luacom](https://github.com/shere-avintec/luacom) (+1 commit):** CI/CD environment optimizations.
 *   **[JoshuaTiffany/luacom](https://github.com/JoshuaTiffany/luacom) (+1 commit):** Metadata and build-info updates.
+*   **[Cr4xy/luacom](https://github.com/Cr4xy/luacom):** Added date rounding, COM ownership fixes, record conversion, thread-local code pages, and 64-bit variant handling.
 
 ## Key Features & Improvements
 
@@ -61,4 +62,4 @@ davidm/luacom (Original)
 ```
 
 ## License
-This project follows the original LuaCOM license (MIT/X11). See the [COPYRIGHT](https://github.com/OneLuaPro/luacom/blob/master/COPYRIGHT) file for details.
+This project follows the original LuaCOM license (MIT/X11). See the [COPYRIGHT](COPYRIGHT) file for details.
