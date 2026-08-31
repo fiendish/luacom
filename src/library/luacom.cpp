@@ -2140,11 +2140,21 @@ static int call_event(lua_State *L)
 
 static int luacom_RoundTrip(lua_State *L) {
   VARIANTARG v;
+  VariantInit(&v);
 
-  tLuaCOMTypeHandler *handler = new tLuaCOMTypeHandler(NULL);
-  handler->lua2com(L, 1, v);
-  handler->com2lua(L, v);
-  delete handler;
+  tLuaCOMTypeHandler handler(NULL);
+  try
+  {
+    handler.lua2com(L, 1, v);
+    handler.com2lua(L, v);
+  }
+  catch(...)
+  {
+    VariantClear(&v);
+    throw;
+  }
+
+  VariantClear(&v);
 
   return 1;
 }

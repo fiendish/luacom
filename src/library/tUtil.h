@@ -9,7 +9,15 @@
 #include <stdio.h>
 #include "tStringBuffer.h"  // Added by ClassView
 
-extern UINT code_page;		// can be set by Lua
+#if defined(_MSC_VER)
+#define LUACOM_THREAD_LOCAL __declspec(thread)
+#elif defined(__GNUC__)
+#define LUACOM_THREAD_LOCAL __thread
+#else
+#define LUACOM_THREAD_LOCAL thread_local
+#endif
+
+extern LUACOM_THREAD_LOCAL UINT code_page;		// can be set by Lua
 struct lua_State;
 class tUtil  
 {
@@ -26,6 +34,9 @@ public:
   static bool IsValidString(LPCTSTR string);
   static void RegistrySetString(lua_State* L, const char& Key, const char* value);
   static tStringBuffer RegistryGetString(lua_State* L, const char& Key);
+  static BOOL VariantTimeToSystemTimeWithMilliseconds(double variant_time, SYSTEMTIME* system_time);
+  static BOOL SystemTimeToVariantTimeWithMilliseconds(SYSTEMTIME system_time, double* variant_time);
+  static BOOL RoundSystemTimeToNearestSecond(SYSTEMTIME* system_time);
 
   static FILE* log_file;
 };

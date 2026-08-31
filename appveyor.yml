@@ -22,10 +22,8 @@ build_script:
 
 test_script:
   - lua -lluacom -v -e"print{}"
+  - lua src\test\luacom_roundtrip_tests.lua
 
 artifacts:
   - path: bin/luacom.dll
     name: luacom
-
-test_script:
-  - lua -lluacom -v -e"print{}"

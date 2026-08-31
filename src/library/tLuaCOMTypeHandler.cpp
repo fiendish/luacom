@@ -18,6 +18,7 @@ extern "C"
 
 #include <assert.h>
 #include <stdio.h>
+#include <vector>
 
 #include "tLuaCOMTypeHandler.h"
 #include "tLuaCOM.h"
@@ -46,6 +47,103 @@ static const char *const com_type_names[] = {
   "int2", "uint2", "int1", "uint1", "int", "uint", "string", "null", "error", "bool", NULL
 };
 
+namespace
+{
+class BstrArray
+{
+public:
+  explicit BstrArray(size_t count) : values(count, NULL) {}
+  ~BstrArray()
+  {
+    for(size_t i = 0; i < values.size(); i++)
+      SysFreeString(values[i]);
+  }
+
+  BSTR* data() { return values.empty() ? NULL : &values[0]; }
+
+private:
+  std::vector<BSTR> values;
+};
+
+class VariantValue
+{
+public:
+  VariantValue() { VariantInit(&value); }
+  ~VariantValue() { VariantClear(&value); }
+
+  VARIANT value;
+};
+
+const char* numericVariantTypeName(VARTYPE vt)
+{
+  switch(vt)
+  {
+    case VT_CY: return "currency";
+    case VT_UI1: return "uint1";
+    case VT_UI2: return "uint2";
+    case VT_UI4: return "uint4";
+    case VT_UI8: return "uint8";
+    case VT_INT: return "int";
+    case VT_UINT: return "uint";
+    case VT_I1: return "int1";
+    case VT_I2: return "int2";
+    case VT_I4: return "int4";
+    case VT_I8: return "int8";
+    case VT_R4: return "float";
+    case VT_DECIMAL: return "decimal";
+    case VT_R8: return "double";
+    default: return "double";
+  }
+}
+
+void pushTableVariantHeader(lua_State* L, VARTYPE vt)
+{
+  lua_newtable(L);
+  lua_pushstring(L, "Type");
+  lua_pushstring(L, numericVariantTypeName(vt));
+  lua_settable(L, -3);
+  lua_pushstring(L, "Value");
+}
+
+void pushSignedInteger(lua_State* L, LONGLONG value)
+{
+#if LUA_VERSION_NUM >= 503
+  if(value >= static_cast<LONGLONG>(LUA_MININTEGER) &&
+     value <= static_cast<LONGLONG>(LUA_MAXINTEGER))
+  {
+    lua_pushinteger(L, static_cast<lua_Integer>(value));
+    return;
+  }
+#endif
+  lua_pushnumber(L, static_cast<lua_Number>(value));
+}
+
+void pushUnsignedInteger(lua_State* L, ULONGLONG value)
+{
+#if LUA_VERSION_NUM >= 503
+  if(value <= static_cast<ULONGLONG>(LUA_MAXINTEGER))
+  {
+    lua_pushinteger(L, static_cast<lua_Integer>(value));
+    return;
+  }
+#endif
+  lua_pushnumber(L, static_cast<lua_Number>(value));
+}
+
+bool pushLuaDispatchIfSameState(lua_State* L, IUnknown* object)
+{
+  tCOMPtr<IUnknown> proxy_manager;
+  HRESULT hr = object->QueryInterface(IID_IProxyManager, (void**)&proxy_manager);
+  if(hr != E_NOINTERFACE)
+    return false;
+
+  tCOMPtr<ILuaDispatch> lua_dispatch;
+  hr = object->QueryInterface(IID_ILuaDispatch, (void**)&lua_dispatch);
+  return SUCCEEDED(hr) && SUCCEEDED(lua_dispatch->PushIfSameState(L));
+}
+
+}
+
 
 tLuaCOMTypeHandler::tLuaCOMTypeHandler(ITypeInfo *ptypeinfo)
 {
@@ -64,51 +162,20 @@ tLuaCOMTypeHandler::~tLuaCOMTypeHandler()
   helper function for com2lua.
 */
 void tLuaCOMTypeHandler::pushTableVarNumber(lua_State *L, VARTYPE vt, double val) {
-  lua_newtable(L);
-  lua_pushstring(L, "Type");
-  switch(vt) {
-    case VT_CY:
-      lua_pushstring(L, "currency");
-      break;
-    case VT_UI1:
-      lua_pushstring(L, "uint1");
-      break;
-    case VT_UI2:
-      lua_pushstring(L, "uint2");
-      break;
-    case VT_UI4:
-      lua_pushstring(L, "uint4");
-      break;
-    case VT_INT:
-      lua_pushstring(L, "int");
-      break;
-    case VT_UINT:
-      lua_pushstring(L, "uint");
-      break;
-    case VT_I1:
-      lua_pushstring(L, "int1");
-      break;
-    case VT_I2:
-      lua_pushstring(L, "int2");
-      break;
-    case VT_I4:
-      lua_pushstring(L, "int4");
-      break;
-    case VT_R4:
-      lua_pushstring(L, "float");
-      break;
-    case VT_R8:
-      lua_pushstring(L, "double");
-      break;
-    case VT_DECIMAL:
-      lua_pushstring(L, "decimal");
-      break;
-    default:
-      lua_pushstring(L, "double");
-  }
-  lua_settable(L, -3);
-  lua_pushstring(L, "Value");
+  pushTableVariantHeader(L, vt);
   lua_pushnumber(L, val);
+  lua_settable(L, -3);
+}
+
+void tLuaCOMTypeHandler::pushTableVarInteger(lua_State *L, VARTYPE vt, LONGLONG val) {
+  pushTableVariantHeader(L, vt);
+  pushSignedInteger(L, val);
+  lua_settable(L, -3);
+}
+
+void tLuaCOMTypeHandler::pushTableVarUnsignedInteger(lua_State *L, VARTYPE vt, ULONGLONG val) {
+  pushTableVariantHeader(L, vt);
+  pushUnsignedInteger(L, val);
   lua_settable(L, -3);
 }
 
@@ -180,6 +247,18 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
         }
         else lua_pushnil(L);
         break;
+      case VT_I8:
+        if(is_variant && table_variants)
+          pushTableVarInteger(L, varg.vt, varg.llVal);
+        else
+          pushSignedInteger(L, varg.llVal);
+        break;
+      case VT_UI8:
+        if(is_variant && table_variants)
+          pushTableVarUnsignedInteger(L, varg.vt, varg.ullVal);
+        else
+          pushUnsignedInteger(L, varg.ullVal);
+        break;
       case VT_CY:
       case VT_UI1:
       case VT_UI2:
@@ -221,7 +300,8 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
           else if(strcmp("table",dateformat)==0)
           {
             SYSTEMTIME date;
-            VariantTimeToSystemTime(varg.date,&date);
+            if(!tUtil::VariantTimeToSystemTimeWithMilliseconds(varg.date, &date))
+              COM_ERROR("Cannot convert COM date to system time.");
             lua_newtable(L);
             lua_pushstring(L, "Day");
             lua_pushnumber(L, date.wDay);
@@ -247,6 +327,57 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
             lua_pushstring(L, "Milliseconds");
             lua_pushnumber(L, date.wMilliseconds);
             lua_settable(L, -3);
+          }
+          else if(strcmp("string_ms_accurate",dateformat)==0)
+          {
+            SYSTEMTIME date;
+            if(!tUtil::VariantTimeToSystemTimeWithMilliseconds(varg.date, &date))
+              COM_ERROR("Cannot convert COM date to system time.");
+            if(!tUtil::RoundSystemTimeToNearestSecond(&date))
+              COM_ERROR(tUtil::GetErrorMessage(GetLastError()));
+
+            if(date.wYear < 1601)
+            {
+              double rounded_date;
+              if(!tUtil::SystemTimeToVariantTimeWithMilliseconds(
+                   date, &rounded_date))
+                COM_ERROR("Cannot convert system time to COM date.");
+
+              VARIANTARG rounded_varg;
+              VariantInit(&rounded_varg);
+              rounded_varg.vt = VT_DATE;
+              rounded_varg.date = rounded_date;
+              HRESULT hr = VariantChangeType(
+                &new_varg, &rounded_varg, 0, VT_BSTR);
+              CHK_COM_CODE(hr);
+              lua_pushstring(L, tUtil::bstr2string(new_varg.bstrVal));
+              break;
+            }
+
+            const int date_length = GetDateFormatW(
+              LOCALE_USER_DEFAULT, DATE_SHORTDATE, &date, NULL, NULL, 0);
+            const int time_length = GetTimeFormatW(
+              LOCALE_USER_DEFAULT, 0, &date, NULL, NULL, 0);
+            if(date_length == 0 || time_length == 0)
+              COM_ERROR(tUtil::GetErrorMessage(GetLastError()));
+
+            std::vector<wchar_t> formatted(date_length + time_length);
+            if(GetDateFormatW(
+                 LOCALE_USER_DEFAULT, DATE_SHORTDATE, &date, NULL,
+                 &formatted[0], date_length) == 0)
+              COM_ERROR(tUtil::GetErrorMessage(GetLastError()));
+
+            formatted[date_length - 1] = L' ';
+            if(GetTimeFormatW(
+                 LOCALE_USER_DEFAULT, 0, &date, NULL,
+                 &formatted[date_length], time_length) == 0)
+              COM_ERROR(tUtil::GetErrorMessage(GetLastError()));
+
+            BSTR formatted_date = SysAllocString(&formatted[0]);
+            CHKMALLOC(formatted_date);
+            tStringBuffer date_string = tUtil::bstr2string(formatted_date);
+            SysFreeString(formatted_date);
+            lua_pushstring(L, date_string);
           }
 
           break;
@@ -308,11 +439,7 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
             break;
           }
 
-          IUnknown* pProxMgr;
-          ILuaDispatch *pLuaDispatch;
-          if((pdisp->QueryInterface(IID_IProxyManager, (void**)&pProxMgr)==E_NOINTERFACE) &&
-              SUCCEEDED(pdisp->QueryInterface(IID_ILuaDispatch, (void**)&pLuaDispatch)) &&
-              SUCCEEDED(pLuaDispatch->PushIfSameState(L)))
+          if(pushLuaDispatchIfSameState(L, pdisp))
             break;
 
           tLuaCOM* lcom = NULL;
@@ -343,11 +470,7 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
 
           if(SUCCEEDED(hr))
           {
-            IUnknown* pProxMgr;
-            ILuaDispatch *pLuaDispatch;
-            if((pdisp->QueryInterface(IID_IProxyManager, (void**)&pProxMgr)==E_NOINTERFACE) &&
-                SUCCEEDED(pdisp->QueryInterface(IID_ILuaDispatch, (void**)&pLuaDispatch)) &&
-                  SUCCEEDED(pLuaDispatch->PushIfSameState(L)))
+            if(pushLuaDispatchIfSameState(L, pdisp))
               break;
 
                tLuaCOM* lcom = NULL;
@@ -377,6 +500,34 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
           // defaults to pushing and userdata for the IUnknown
           varg.punkVal->AddRef();
           pushIUnknown(L, varg.punkVal);
+          break;
+        }
+
+      case VT_RECORD:
+        {
+          if(varg.pRecInfo == NULL || varg.pvRecord == NULL)
+            TYPECONV_ERROR("COM record has no record information or data.");
+
+          ULONG field_count = 0;
+          hr = varg.pRecInfo->GetFieldNames(&field_count, NULL);
+          CHK_COM_CODE(hr);
+
+          BstrArray field_names(field_count);
+          ULONG returned_count = field_count;
+          hr = varg.pRecInfo->GetFieldNames(&returned_count, field_names.data());
+          CHK_COM_CODE(hr);
+
+          lua_newtable(L);
+          for(ULONG i = 0; i < returned_count; i++)
+          {
+            VariantValue field;
+            hr = varg.pRecInfo->GetField(varg.pvRecord, field_names.data()[i], &field.value);
+            CHK_COM_CODE(hr);
+
+            lua_pushstring(L, tUtil::bstr2string(field_names.data()[i]));
+            com2lua(L, field.value, true);
+            lua_settable(L, -3);
+          }
           break;
         }
 
@@ -465,6 +616,24 @@ void tLuaCOMTypeHandler::lua2com(lua_State* L, stkIndex luaval, VARIANTARG& varg
   switch(lua_type(L, luaval))
   {
   case LUA_TNUMBER:
+#if LUA_VERSION_NUM >= 503
+    if(lua_isinteger(L, luaval))
+    {
+      const lua_Integer value = lua_tointeger(L, luaval);
+      if(type == VT_I8)
+      {
+        varg.vt = VT_I8;
+        varg.llVal = static_cast<LONGLONG>(value);
+        break;
+      }
+      if(type == VT_UI8 && value >= 0)
+      {
+        varg.vt = VT_UI8;
+        varg.ullVal = static_cast<ULONGLONG>(value);
+        break;
+      }
+    }
+#endif
     varg.dblVal = lua_tonumber(L, luaval);
     varg.vt = VT_R8;
     break;
@@ -562,10 +731,20 @@ void tLuaCOMTypeHandler::lua2com(lua_State* L, stkIndex luaval, VARIANTARG& varg
             VariantChangeType(&varg, &varg, 0, VT_DECIMAL);
           } else if(strcmp(vtype, "int8") == 0) {
             varg.vt = VT_I8;
-            varg.llVal = (LONGLONG)lua_tonumber(L, -1);
+#if LUA_VERSION_NUM >= 503
+            if(lua_isinteger(L, -1))
+              varg.llVal = static_cast<LONGLONG>(lua_tointeger(L, -1));
+            else
+#endif
+              varg.llVal = static_cast<LONGLONG>(lua_tonumber(L, -1));
           } else if(strcmp(vtype, "uint8") == 0) {
             varg.vt = VT_UI8;
-            varg.ullVal = (ULONGLONG)lua_tonumber(L, -1);
+#if LUA_VERSION_NUM >= 503
+            if(lua_isinteger(L, -1))
+              varg.ullVal = static_cast<ULONGLONG>(lua_tointeger(L, -1));
+            else
+#endif
+              varg.ullVal = static_cast<ULONGLONG>(lua_tonumber(L, -1));
           } else if(strcmp(vtype, "int4") == 0) {
             varg.vt = VT_I4;
             varg.lVal = (int)lua_tonumber(L, -1);
@@ -650,7 +829,8 @@ void tLuaCOMTypeHandler::lua2com(lua_State* L, stkIndex luaval, VARIANTARG& varg
           lua_pop(L, 1);
           if(isdate) {
             varg.vt = VT_DATE;
-            SystemTimeToVariantTime(&date, &varg.date);
+            if(!tUtil::SystemTimeToVariantTimeWithMilliseconds(date, &varg.date))
+              COM_ERROR("Cannot convert system time to COM date.");
           } else safearray_lua2com(L, luaval, varg, VT_VARIANT);
         }
       }
@@ -1262,6 +1442,14 @@ void tLuaCOMTypeHandler::put_in_array(SAFEARRAY* safearray,
 
   case VT_I4:
     hr = SafeArrayPutElement(safearray, indices, &var_value.lVal);
+    break;
+
+  case VT_I8:
+    hr = SafeArrayPutElement(safearray, indices, &var_value.llVal);
+    break;
+
+  case VT_UI8:
+    hr = SafeArrayPutElement(safearray, indices, &var_value.ullVal);
     break;
 
   case VT_R4:
@@ -2083,6 +2271,7 @@ long tLuaCOMTypeHandler::VariantSize(VARTYPE vt)
   {
   case VT_I2: return 2;
   case VT_I4: return 4;
+  case VT_I8: return 8;
   case VT_R4: return 4;
   case VT_R8: return 8;
   case VT_CY: return sizeof(CURRENCY);
@@ -2097,6 +2286,7 @@ long tLuaCOMTypeHandler::VariantSize(VARTYPE vt)
   case VT_UI1: case VT_I1: return 1;
   case VT_UI2: return 2;
   case VT_UI4: return 4;
+  case VT_UI8: return 8;
   case VT_INT: return sizeof(int);
   case VT_UINT: return sizeof(unsigned int);
   default: TYPECONV_ERROR("Unknown type");

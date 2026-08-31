@@ -1471,6 +1471,10 @@ fields. To return the conversion to strings, set the
 \verb+DateFormat+ field to \verb+"string"+. Be careful with this
 feature, as it may break compatibility with other scripts.
 
+Set the \verb+DateFormat+ field to \verb+"string_ms_accurate"+ to
+format the value as a locale-specific string with correct rounding at
+the half-second boundary. This option does not change the default format.
+
 \subsection{Variants}
 
 When converting from \com\ to \lua, the default behavior is to
@@ -1482,6 +1486,10 @@ tables will have a \verb+Type+ field telling the original type of
 the variant, and a \verb+Value+ field containing the conversion to
 the closest Lua type. Be careful with this feature, as it may break
 compatibility with other scripts.
+
+On Lua 5.3 and later, \ident{VT_I8} and \ident{VT_UI8} values use the
+Lua integer subtype when the value is in its range. Larger unsigned
+values use a Lua number and can lose precision.
 
 \subsection{Error Handling}
 When \luacom\ cannot convert a value from or to \com\, it issues an

@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <process.h>  // spawnlp
 #include <limits.h>
+#include <math.h>
 
 #include "tUtil.h"
 #include "tLuaCOMException.h"
@@ -21,14 +22,124 @@ extern "C"
 
 #define MAX_VALID_STRING_SIZE 1000
 
+namespace
+{
+bool isLeapYear(WORD year)
+{
+  return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+}
+
+WORD daysInMonth(WORD year, WORD month)
+{
+  static const WORD days[] = {
+    31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+  };
+
+  if(month < 1 || month > 12)
+    return 0;
+  if(month == 2 && isLeapYear(year))
+    return 29;
+  return days[month - 1];
+}
+
+BOOL decrementSystemTimeOneSecond(SYSTEMTIME* system_time)
+{
+  SYSTEMTIME adjusted = *system_time;
+  if(adjusted.wSecond > 0)
+    --adjusted.wSecond;
+  else
+  {
+    adjusted.wSecond = 59;
+    if(adjusted.wMinute > 0)
+      --adjusted.wMinute;
+    else
+    {
+      adjusted.wMinute = 59;
+      if(adjusted.wHour > 0)
+        --adjusted.wHour;
+      else
+      {
+        adjusted.wHour = 23;
+        if(adjusted.wDay > 1)
+          --adjusted.wDay;
+        else
+        {
+          if(adjusted.wMonth > 1)
+            --adjusted.wMonth;
+          else
+          {
+            if(adjusted.wYear <= 100)
+              return FALSE;
+            --adjusted.wYear;
+            adjusted.wMonth = 12;
+          }
+          adjusted.wDay = daysInMonth(adjusted.wYear, adjusted.wMonth);
+        }
+        if(adjusted.wDayOfWeek <= 6)
+          adjusted.wDayOfWeek = (adjusted.wDayOfWeek + 6) % 7;
+      }
+    }
+  }
+
+  *system_time = adjusted;
+  return TRUE;
+}
+
+BOOL incrementSystemTimeOneSecond(SYSTEMTIME* system_time)
+{
+  SYSTEMTIME adjusted = *system_time;
+  if(adjusted.wSecond < 59)
+    ++adjusted.wSecond;
+  else
+  {
+    adjusted.wSecond = 0;
+    if(adjusted.wMinute < 59)
+      ++adjusted.wMinute;
+    else
+    {
+      adjusted.wMinute = 0;
+      if(adjusted.wHour < 23)
+        ++adjusted.wHour;
+      else
+      {
+        adjusted.wHour = 0;
+        const WORD month_days = daysInMonth(adjusted.wYear, adjusted.wMonth);
+        if(month_days == 0)
+          return FALSE;
+        if(adjusted.wDay < month_days)
+          ++adjusted.wDay;
+        else
+        {
+          adjusted.wDay = 1;
+          if(adjusted.wMonth < 12)
+            ++adjusted.wMonth;
+          else
+          {
+            if(adjusted.wYear >= 9999)
+              return FALSE;
+            ++adjusted.wYear;
+            adjusted.wMonth = 1;
+          }
+        }
+        if(adjusted.wDayOfWeek <= 6)
+          adjusted.wDayOfWeek = (adjusted.wDayOfWeek + 1) % 7;
+      }
+    }
+  }
+
+  *system_time = adjusted;
+  return TRUE;
+}
+}
+
 // https://github.com/windtail/luacom/commit/3852e47c2f0fe77477cbde54541228cd2f7b8901
 // - in none-english environment (i am Chinese) we DO NOT use CP_UTF8, CP_ACP should be used
 // - while Cygwin default convert filename internally to UTF-8
 // - we have to use ASCII format for our lua source code, if you prefer UTF-8, you need luaiconv to convert UTF-8 to your ASCII format (GBK or other)
 #ifdef __CYGWIN__
-UINT code_page=CP_UTF8; // By default, Cygwin internally convert filename to UTF-8
+LUACOM_THREAD_LOCAL UINT code_page=CP_UTF8; // By default, Cygwin internally convert filename to UTF-8
 #else
-UINT code_page=CP_ACP;
+LUACOM_THREAD_LOCAL UINT code_page=CP_ACP;
 #endif
 
 FILE* tUtil::log_file = NULL;
@@ -333,4 +444,88 @@ tStringBuffer tUtil::RegistryGetString(lua_State* L, const char& Key)
 	lua_pushlightuserdata(L, (void *)&Key);  /* push address */ 
     lua_gettable(L, LUA_REGISTRYINDEX);  /* retrieve value */ 
     return tStringBuffer(lua_tostring(L, -1));  /* convert to string */
+}
+
+BOOL tUtil::VariantTimeToSystemTimeWithMilliseconds(
+  double variant_time,
+  SYSTEMTIME* system_time)
+{
+  if(system_time == NULL)
+    return FALSE;
+
+  if(!VariantTimeToSystemTime(variant_time, system_time))
+    return FALSE;
+
+  double whole_days = 0.0;
+  double fraction = modf(variant_time, &whole_days);
+  if(fraction < 0.0)
+    fraction = -fraction;
+
+  const DWORD seconds_per_day = 24 * 60 * 60;
+  const double milliseconds_per_day = seconds_per_day * 1000.0;
+  double total_milliseconds = floor(
+    fraction * milliseconds_per_day + 0.5);
+  if(total_milliseconds >= milliseconds_per_day)
+    total_milliseconds = 0.0;
+
+  const DWORD rounded_milliseconds =
+    static_cast<DWORD>(total_milliseconds);
+  const DWORD target_second = rounded_milliseconds / 1000;
+  const DWORD converted_second =
+    system_time->wHour * 60 * 60
+    + system_time->wMinute * 60
+    + system_time->wSecond;
+
+  if(converted_second == (target_second + 1) % seconds_per_day)
+  {
+    if(!decrementSystemTimeOneSecond(system_time))
+      return FALSE;
+  }
+  else if(converted_second != target_second)
+    return FALSE;
+
+  system_time->wMilliseconds = static_cast<WORD>(
+    rounded_milliseconds % 1000);
+  return TRUE;
+}
+
+BOOL tUtil::SystemTimeToVariantTimeWithMilliseconds(
+  SYSTEMTIME system_time,
+  double* variant_time)
+{
+  if(variant_time == NULL)
+    return FALSE;
+
+  const WORD milliseconds = system_time.wMilliseconds;
+  system_time.wMilliseconds = 0;
+
+  double whole_seconds = 0.0;
+  if(!SystemTimeToVariantTime(&system_time, &whole_seconds))
+    return FALSE;
+
+  const double fraction = milliseconds / (24.0 * 60.0 * 60.0 * 1000.0);
+  *variant_time = whole_seconds < 0.0
+    ? whole_seconds - fraction
+    : whole_seconds + fraction;
+  return TRUE;
+}
+
+BOOL tUtil::RoundSystemTimeToNearestSecond(SYSTEMTIME* system_time)
+{
+  if(system_time == NULL)
+    return FALSE;
+
+  if(system_time->wMilliseconds < 500)
+  {
+    system_time->wMilliseconds = 0;
+    return TRUE;
+  }
+
+  if(!incrementSystemTimeOneSecond(system_time))
+  {
+    SetLastError(ERROR_INVALID_TIME);
+    return FALSE;
+  }
+  system_time->wMilliseconds = 0;
+  return TRUE;
 }

@@ -76,3 +76,4 @@ install_doc ( doc/luacom.gif doc/luacom.pdf www/index.html )
 install_example ( demo/ )
 
 add_lua_test ( ${CMAKE_CURRENT_SOURCE_DIR}/src/test/luacom_tests5.lua )
+add_lua_test ( ${CMAKE_CURRENT_SOURCE_DIR}/src/test/luacom_roundtrip_tests.lua )
