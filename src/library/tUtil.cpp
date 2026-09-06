@@ -205,71 +205,42 @@ tStringBuffer tUtil::GetErrorMessage(DWORD errorcode)
 
 tStringBuffer tUtil::bstr2string(BSTR bstr, bool nullTerminated)
 {
-  char* str = NULL;
-  size_t len = 0;
-  try
-  {
-    if(bstr == NULL) // NULL BSTR indicates empty string.
-    {
-      len = 0;
-      return "";
-    }
-    else
-    {
-
-      UINT lenWide = SysStringLen(bstr); // not including '\0' terminator
-      if (lenWide > INT_MAX) LUACOM_ERROR("string too long");
-
-      if(lenWide == 0)
-      {
-        len = 0;
-        return "";
-      }
-
-      // gets string length
-      int lenMulti = WideCharToMultiByte(
-        code_page,            // code page
-        0,            // performance and mapping flags
-        bstr,    // wide-character string
-        static_cast<int>(lenWide),  // number of chars in string
-        str,     // buffer for new string
-        0,          // size of buffer (0=return it)
-        NULL,     // default for unmappable chars
-        NULL  // set when default char used
-      );
-
-      if(!lenMulti)
-        LUACOM_ERROR(tUtil::GetErrorMessage(GetLastError()));
-
-      struct C { C(int size) { s = new char[size]; }
-		~C() { delete [] s; } char * s; } str(lenMulti + (nullTerminated? 1 : 0));
-
-      int result = WideCharToMultiByte(
-        code_page,            // code page
-        0,            // performance and mapping flags
-        bstr,    // wide-character string
-        static_cast<int>(lenWide),  // number of chars in string
-        str.s,     // buffer for new string
-        lenMulti,          // size of buffer
-        NULL,     // default for unmappable chars
-        NULL  // set when default char used
-      );
-
-      if(!result)
-        LUACOM_ERROR(tUtil::GetErrorMessage(GetLastError()));
-      
-      if (nullTerminated) str.s[lenMulti] = '\0';
-	  len = lenMulti + (nullTerminated? 1 : 0);
-      return tStringBuffer(str.s, len);
-    }
-  }
-  catch(class tLuaCOMException& e)
-  {
-    UNUSED(e);
-    len = 0;
+  if(bstr == NULL) // NULL BSTR indicates empty string.
     return "";
-  }
 
+  UINT lenWide = SysStringLen(bstr); // not including '\0' terminator
+  if(lenWide > INT_MAX)
+    LUACOM_ERROR("string too long");
+
+  if(lenWide == 0)
+    return "";
+
+  // gets string length
+  int lenMulti = WideCharToMultiByte(
+    code_page, 0, bstr, static_cast<int>(lenWide), NULL, 0, NULL, NULL);
+
+  if(!lenMulti)
+    LUACOM_ERROR(tUtil::GetErrorMessage(GetLastError()));
+
+  struct C
+  {
+    C(int size) { s = new char[size]; }
+    ~C() { delete [] s; }
+    char * s;
+  } str(lenMulti + (nullTerminated ? 1 : 0));
+
+  int result = WideCharToMultiByte(
+    code_page, 0, bstr, static_cast<int>(lenWide), str.s, lenMulti,
+    NULL, NULL);
+
+  if(!result)
+    LUACOM_ERROR(tUtil::GetErrorMessage(GetLastError()));
+  if(result != lenMulti)
+    LUACOM_ERROR("string conversion was incomplete");
+
+  if(nullTerminated)
+    str.s[lenMulti] = '\0';
+  return tStringBuffer(str.s, lenMulti + (nullTerminated ? 1 : 0));
 }
 
 BSTR tUtil::string2bstr(const char * string, size_t len)
@@ -277,30 +248,43 @@ BSTR tUtil::string2bstr(const char * string, size_t len)
   if(!string)
     return NULL;
 
-  try
+  if(len == 0)
   {
-    BSTR bstr;
-    if(len == 0)
-    {
-      bstr = SysAllocStringLen(NULL, 0);
-    }
-    else
-    {
-      if (len != -1 && len > INT_MAX) LUACOM_ERROR("string too long");
-      int lenWide =
-        MultiByteToWideChar(code_page, 0, string, static_cast<int>(len), NULL, 0);
-      if(lenWide == 0)
-        LUACOM_ERROR(tUtil::GetErrorMessage(GetLastError()));
-      bstr = SysAllocStringLen(NULL, lenWide); // plus initializes '\0' terminator
-      MultiByteToWideChar(  code_page, 0, string, static_cast<int>(len), bstr, lenWide);
-    }
+    BSTR bstr = SysAllocStringLen(NULL, 0);
+    CHKMALLOC(bstr);
     return bstr;
   }
-  catch(class tLuaCOMException& e)
+
+  const bool nullTerminated = len == static_cast<size_t>(-1);
+  if(!nullTerminated && len > INT_MAX)
+    LUACOM_ERROR("string too long");
+
+  const int sourceLength = nullTerminated ? -1 : static_cast<int>(len);
+  const int lenWide =
+    MultiByteToWideChar(code_page, 0, string, sourceLength, NULL, 0);
+  if(lenWide == 0)
+    LUACOM_ERROR(tUtil::GetErrorMessage(GetLastError()));
+
+  const UINT bstrLength = static_cast<UINT>(
+    nullTerminated ? lenWide - 1 : lenWide);
+  BSTR bstr = SysAllocStringLen(NULL, bstrLength);
+  CHKMALLOC(bstr);
+
+  const int converted =
+    MultiByteToWideChar(code_page, 0, string, sourceLength, bstr, lenWide);
+  if(!converted)
   {
-    UNUSED(e);
-    return NULL;
+    const DWORD error = GetLastError();
+    SysFreeString(bstr);
+    LUACOM_ERROR(tUtil::GetErrorMessage(error));
   }
+  if(converted != lenWide)
+  {
+    SysFreeString(bstr);
+    LUACOM_ERROR("string conversion was incomplete");
+  }
+
+  return bstr;
 }
 
 bool tUtil::OpenLogFile(const char *name)

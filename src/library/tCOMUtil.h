@@ -81,6 +81,7 @@ public:
   T** operator & () { return &m_p; }   // useful for QueryInterface
   void Attach(T* p) { if (m_p) m_p->Release(); m_p = p; }
   void Release() { if (m_p) m_p->Release(); m_p = NULL; }
+  T * Detach() { T * p = m_p; m_p = NULL; return p; }
   T * Raw() { return m_p; }
 private:
   void AddRef() { if (m_p) m_p->AddRef(); }
