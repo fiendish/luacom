@@ -145,7 +145,7 @@ private:
     RECT m_rcLocation;              // location
     HWND m_hwnd;                    // window handle
     HWND m_hwndParent;              // parent window handle
-    HRGN m_hRgn;                    // GDI region
+    bool m_hasWindowRgn;            // window owns its current GDI region
 
     bool m_fDirty:1;                       // does the control need to be resaved?
     bool m_fInPlaceActive:1;               // are we in place active or not?
@@ -166,7 +166,7 @@ public:
     // Construction
 
     CEnumOLEVERB(const OLEVERB* verbs, ULONG verbsSize, ULONG verbsNext=0)
-         : mRefCount(0), mVerbs(verbs), mVerbsSize(verbsSize), mVerbsNext(verbsNext) {}
+         : mRefCount(1), mVerbs(verbs), mVerbsSize(verbsSize), mVerbsNext(verbsNext) {}
     ~CEnumOLEVERB() { }
     
     // IUnknown methods
@@ -190,20 +190,46 @@ public:
 
     HRESULT _stdcall Clone(IEnumOLEVERB** ppenum)
     {
-        *ppenum = new CEnumOLEVERB(mVerbs, mVerbsSize, mVerbsNext);
+        if(!ppenum) return E_POINTER;
+        *ppenum = NULL;
+        try
+        {
+            *ppenum = new CEnumOLEVERB(mVerbs, mVerbsSize, mVerbsNext);
+        }
+        catch (...)
+        {
+            return E_OUTOFMEMORY;
+        }
         return S_OK;
     }
     
     HRESULT _stdcall Next(ULONG celt, OLEVERB* rgelt, ULONG* pceltFetched)
     {
         if(!rgelt) return E_POINTER; // unspecified behavior (violates precondition)
+        if(!pceltFetched && celt != 1) return E_POINTER;
+        if(pceltFetched) *pceltFetched = 0;
         ULONG i;
         for(i = 0; i < celt && mVerbsNext + i < mVerbsSize; ++i)
         {
             int verbsi = mVerbsNext + i;
             rgelt[i] = mVerbs[verbsi];
+            if(!mVerbs[verbsi].lpszVerbName)
+            {
+                rgelt[i].lpszVerbName = NULL;
+                continue;
+            }
             rgelt[i].lpszVerbName = static_cast<wchar_t*>(
-                CoTaskMemAlloc(lstrlenW(mVerbs[verbsi].lpszVerbName) * 2 + 2));
+                CoTaskMemAlloc((lstrlenW(mVerbs[verbsi].lpszVerbName) + 1) *
+                               sizeof(wchar_t)));
+            if(!rgelt[i].lpszVerbName)
+            {
+                for(ULONG j = 0; j < i; ++j)
+                {
+                    CoTaskMemFree(rgelt[j].lpszVerbName);
+                    rgelt[j].lpszVerbName = NULL;
+                }
+                return E_OUTOFMEMORY;
+            }
             lstrcpyW(rgelt[i].lpszVerbName, mVerbs[verbsi].lpszVerbName);
         }
         mVerbsNext += i;
@@ -219,8 +245,13 @@ public:
 
     HRESULT _stdcall Skip(ULONG celt)
     {
-        ULONG n = mVerbsNext + static_cast<ULONG>(celt);
-        mVerbsNext = n > mVerbsSize ? mVerbsSize : n;
+        ULONG remaining = mVerbsSize - mVerbsNext;
+        if(celt > remaining)
+        {
+            mVerbsNext = mVerbsSize;
+            return S_FALSE;
+        }
+        mVerbsNext += celt;
         return S_OK;
     }
 

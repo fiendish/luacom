@@ -28,6 +28,7 @@ extern "C"
 #include "luacom_internal.h"
 #include "tLuaDispatch.h"
 #include "tLuaControl.h"
+#include "tLuaCOMException.h"
 
 static const OLEVERB verbs[] = {
   { OLEIVERB_SHOW,            0, 0, 0},
@@ -37,6 +38,20 @@ static const OLEVERB verbs[] = {
   { OLEIVERB_UIACTIVATE,      0, 0, 0}
 };
 //unused: OLEIVERB_PRIMARY, OLEIVERB_OPEN, OLEIVERB_DISCARDUNDOSTATE
+
+namespace
+{
+class LuaStackRestore
+{
+public:
+  explicit LuaStackRestore(lua_State* state) : L(state), top(lua_gettop(state)) {}
+  ~LuaStackRestore() { lua_settop(L, top); }
+
+private:
+  lua_State* L;
+  int top;
+};
+}
 
 
 #define ASSERT(fTest, szMsg) \
@@ -122,14 +137,16 @@ static HWND GetParkingWindow()
 
 tLuaControl::tLuaControl(lua_State* L, ITypeInfo *pTypeinfo, int ref) :
   tLuaDispatch(L, pTypeinfo, ref),
-  m_hRgn(NULL),
   m_hwnd(NULL),
   m_hwndParent(NULL),
+  m_hasWindowRgn(false),
   m_fDirty(false),
   m_fInPlaceActive(false),
   m_fInPlaceVisible(false),
   m_fUIActive(false)
 {
+  LuaStackRestore stackRestore(L);
+
   // Lua `cx,cy = registry[table_ref]:InitialSize()`
   lua_rawgeti(L, LUA_REGISTRYINDEX, table_ref);
   lua_pushstring(L, "InitialSize");
@@ -158,7 +175,6 @@ tLuaControl::tLuaControl(lua_State* L, ITypeInfo *pTypeinfo, int ref) :
 tLuaControl::~tLuaControl()
 {
   if (m_hwnd) this->DestroyWindow();
-  if (m_hRgn) ::DeleteObject(m_hRgn);
 }
 
 
@@ -176,6 +192,9 @@ void tLuaControl::DestroyWindow()
 
 STDMETHODIMP tLuaControl::QueryInterface(REFIID riid, void** ppv)
 {
+  if(!ppv)
+    return E_POINTER;
+
   IUnknown* ret;
   if(::IsEqualIID(riid, IID_IUnknown)  ||
      ::IsEqualIID(riid, IID_IDispatch) ||
@@ -227,25 +246,34 @@ STDMETHODIMP_(ULONG) tLuaControl::AddRef() throw()
 STDMETHODIMP_(ULONG) tLuaControl::Release() throw()
 {
   assert(m_refs > 0);
-  if(--m_refs == 0)
+  ULONG refs = --m_refs;
+  if(refs == 0)
   {
+    if(m_hwnd)
+    {
+      this->DestroyWindow();
+      m_hwnd = NULL;
+      m_hasWindowRgn = false;
+    }
+
     // unlock Lua table
     luaL_unref(L, LUA_REGISTRYINDEX, table_ref);
 
     // free libs
     while(num_methods--) {
       typeinfo->ReleaseFuncDesc(funcinfo[num_methods].funcdesc);
-      delete funcinfo[num_methods].name;
+      delete[] funcinfo[num_methods].name;
     }
 
-    delete funcinfo;
+    delete[] funcinfo;
     typeinfo->Release(); typeinfo = NULL;
     delete typehandler;
     if(cpc) delete cpc;
     if(classinfo2) delete classinfo2;
     delete this; // destroy object
+    return 0;
   }
-  return m_refs;
+  return refs;
 }
 
 
@@ -362,6 +390,9 @@ STDMETHODIMP tLuaControl::SetMoniker(DWORD dwWitchMoniker, IMoniker* pmk)
 */
 STDMETHODIMP tLuaControl::GetMoniker(DWORD dwAssign, DWORD dwWitchMoniker, IMoniker** ppMoniker)
 {
+  if(!ppMoniker)
+    return E_POINTER;
+  *ppMoniker = NULL;
   return E_NOTIMPL;
 }
 
@@ -389,6 +420,8 @@ STDMETHODIMP tLuaControl::IsUpToDate()
 */
 STDMETHODIMP tLuaControl::GetClipboardData(DWORD dwReserved, IDataObject** ppDataObject)
 {
+  if(!ppDataObject)
+    return E_POINTER;
   *ppDataObject = NULL;
   return E_NOTIMPL;
 }
@@ -435,7 +468,18 @@ STDMETHODIMP tLuaControl::DoVerb(
 */
 STDMETHODIMP tLuaControl::EnumVerbs(IEnumOLEVERB** ppEnumVerbs)
 {
-  *ppEnumVerbs = new CEnumOLEVERB(verbs, 5);
+  if(!ppEnumVerbs)
+    return E_POINTER;
+
+  *ppEnumVerbs = NULL;
+  try
+  {
+    *ppEnumVerbs = new CEnumOLEVERB(verbs, 5);
+  }
+  catch (...)
+  {
+    return E_OUTOFMEMORY;
+  }
   return S_OK;
 }
 
@@ -455,6 +499,8 @@ STDMETHODIMP tLuaControl::Update()
 STDMETHODIMP tLuaControl::GetUserClassID(CLSID* pClsid)
 {
   if(!pClsid) return E_POINTER;
+
+  LuaStackRestore stackRestore(L);
 	
   // Lua `classID = registry[table_ref]:GetClass()`
   lua_rawgeti(L, LUA_REGISTRYINDEX, table_ref);
@@ -466,7 +512,20 @@ STDMETHODIMP tLuaControl::GetUserClassID(CLSID* pClsid)
 
   tStringBuffer classID(lua_tostring(L, -1));
 
-  return ::CLSIDFromString(tUtil::string2bstr(classID),pClsid);
+  BSTR classIDWide = NULL;
+  try
+  {
+    classIDWide = tUtil::string2bstr(classID);
+  }
+  catch(class tLuaCOMException& e)
+  {
+    return e.code == tLuaCOMException::MALLOC_ERROR ? E_OUTOFMEMORY : E_FAIL;
+  }
+  if(!classIDWide)
+    return E_OUTOFMEMORY;
+  HRESULT hr = ::CLSIDFromString(classIDWide, pClsid);
+  SysFreeString(classIDWide);
+  return hr;
 }
 
 
@@ -475,8 +534,14 @@ STDMETHODIMP tLuaControl::GetUserClassID(CLSID* pClsid)
 */
 STDMETHODIMP tLuaControl::GetUserType(DWORD dwFormOfType, LPOLESTR* pszUserType)
 {
+  if(!pszUserType)
+    return E_POINTER;
+  *pszUserType = NULL;
+
   CLSID clsid;
-  this->GetUserClassID(&clsid);
+  HRESULT hr = this->GetUserClassID(&clsid);
+  if(FAILED(hr))
+    return hr;
   return ::OleRegGetUserType(clsid, dwFormOfType, pszUserType);
 }
 
@@ -486,6 +551,11 @@ STDMETHODIMP tLuaControl::GetUserType(DWORD dwFormOfType, LPOLESTR* pszUserType)
 */
 STDMETHODIMP tLuaControl::SetExtent(DWORD  dwDrawAspect, SIZEL *psizel)
 {
+  if(!psizel)
+    return E_POINTER;
+
+  LuaStackRestore stackRestore(L);
+
   if (dwDrawAspect & DVASPECT_CONTENT) {
     // change the units to pixels, and resize the control.
     SIZEL sl;
@@ -540,6 +610,9 @@ STDMETHODIMP tLuaControl::SetExtent(DWORD  dwDrawAspect, SIZEL *psizel)
 */
 STDMETHODIMP tLuaControl::GetExtent(DWORD dwDrawAspect, SIZEL *pSizeLOut)
 {
+  if(!pSizeLOut)
+    return E_POINTER;
+
   if (dwDrawAspect & DVASPECT_CONTENT) {
     ::PixelToHimetric(&m_Size, pSizeLOut);
     return S_OK;
@@ -555,6 +628,9 @@ STDMETHODIMP tLuaControl::GetExtent(DWORD dwDrawAspect, SIZEL *pSizeLOut)
 */
 STDMETHODIMP tLuaControl::Advise(IAdviseSink *pAdviseSink, DWORD *pdwConnection)
 {
+  if(!pAdviseSink || !pdwConnection)
+    return E_POINTER;
+
   // create if not exist
   if (!m_pOleAdviseHolder) {
     HRESULT hr = ::CreateOleAdviseHolder(&m_pOleAdviseHolder);
@@ -583,6 +659,9 @@ STDMETHODIMP tLuaControl::Unadvise(DWORD dwConnection)
 */
 STDMETHODIMP tLuaControl::EnumAdvise(IEnumSTATDATA **ppEnumOut)
 {
+  if(!ppEnumOut)
+    return E_POINTER;
+
   if (!m_pOleAdviseHolder) {
     FAIL("Somebody Called EnumAdvise without setting up any connections!");
     *ppEnumOut = NULL;
@@ -619,6 +698,9 @@ STDMETHODIMP tLuaControl::SetColorScheme(LOGPALETTE* pLogpal)
 */
 STDMETHODIMP tLuaControl::GetWindow(HWND* phwnd)
 {
+  if(!phwnd)
+    return E_POINTER;
+
   *phwnd = m_hwnd;
   return (*phwnd) ? S_OK : E_UNEXPECTED;
 }
@@ -653,14 +735,23 @@ HRESULT tLuaControl::InPlaceActivate(bool lVerb)
 
   // activate the IOleInPlaceSite
   if (!m_fInPlaceActive) {
-    #define RETURN_ON_ERROR if(FAILED(hr)) { m_fInPlaceActive = false; return hr; }
+    #define RETURN_ON_ERROR if(FAILED(hr)) { \
+      if(m_fInPlaceActive) { \
+        m_fInPlaceActive = false; \
+        m_pInPlaceSite->OnInPlaceDeactivate(); \
+      } \
+      m_pInPlaceFrame.Release(); \
+      m_pInPlaceUIWindow.Release(); \
+      m_hwndParent = NULL; \
+      return hr; \
+    }
 
     // OnInPlaceActivate() notifies container that a contained object is being activated in place.
     hr = m_pInPlaceSite->CanInPlaceActivate() == S_OK ? S_OK : E_FAIL;
     RETURN_ON_ERROR;
-    m_fInPlaceActive = true;  // [simplify by moving to end of block?]
-    m_pInPlaceSite->OnInPlaceActivate();
+    hr = m_pInPlaceSite->OnInPlaceActivate();
     RETURN_ON_ERROR;
+    m_fInPlaceActive = true;
 
     // obtain info on IOleInPlaceSite
     hr = m_pInPlaceSite->GetWindow(&m_hwndParent);
@@ -672,7 +763,8 @@ HRESULT tLuaControl::InPlaceActivate(bool lVerb)
     RETURN_ON_ERROR;
     m_Size.cx = rcPos.right - rcPos.left;
     m_Size.cy = rcPos.bottom - rcPos.top;
-    SetObjectRects(&rcPos, &rcClip);
+    hr = SetObjectRects(&rcPos, &rcClip);
+    RETURN_ON_ERROR;
 
     // create child window (and, if absent, parent window)
     hr = this->CreateInPlaceWindow(rcPos.left, rcPos.top, false) ? S_OK : E_FAIL;
@@ -725,6 +817,7 @@ STDMETHODIMP tLuaControl::InPlaceDeactivate()
   if (m_hwnd) {
     this->DestroyWindow();
     m_hwnd = NULL;
+    m_hasWindowRgn = false;
   }
 
   m_pInPlaceFrame.Release();
@@ -763,6 +856,9 @@ STDMETHODIMP tLuaControl::UIDeactivate()
 */
 STDMETHODIMP tLuaControl::SetObjectRects(LPCRECT prcPos, LPCRECT prcClip)
 {
+  if(!prcPos || !prcClip)
+    return E_POINTER;
+
   // move our window to the new location and handle clipping.
   if (m_hwnd) {
     // update clip region
@@ -772,12 +868,21 @@ STDMETHODIMP tLuaControl::SetObjectRects(LPCRECT prcPos, LPCRECT prcClip)
       if ( ::IntersectRect(&rcIntersect, prcPos, prcClip) && ! ::EqualRect(&rcIntersect, prcPos)) {
         ::OffsetRect(&rcIntersect, -(prcPos->left), -(prcPos->top));
         newRgn = ::CreateRectRgnIndirect(&rcIntersect);
+        if(!newRgn) {
+          DWORD error = ::GetLastError();
+          return HRESULT_FROM_WIN32(error ? error : ERROR_NOT_ENOUGH_MEMORY);
+        }
       }
     }
-    if (m_hRgn || newRgn) { // apply region
-      ::SetWindowRgn(m_hwnd, newRgn, TRUE);
-      if (m_hRgn != NULL) DeleteObject(m_hRgn);
-      m_hRgn = newRgn;
+    if (m_hasWindowRgn || newRgn) { // apply region
+      if (!::SetWindowRgn(m_hwnd, newRgn, TRUE)) {
+        DWORD error = ::GetLastError();
+        if (newRgn)
+          ::DeleteObject(newRgn);
+        return HRESULT_FROM_WIN32(error ? error : ERROR_INVALID_FUNCTION);
+      }
+      // After success, Windows owns newRgn and releases any prior window region.
+      m_hasWindowRgn = newRgn != NULL;
     }
 
     // set location
@@ -856,6 +961,8 @@ STDMETHODIMP tLuaControl::Draw(
     DVTARGETDEVICE *ptd, HDC hicTargetDevice, HDC hdcDraw, LPCRECTL prcBounds,
     LPCRECTL prcWBounds, BOOL (__stdcall *pfnContinue)(ULONG_PTR dwContinue), ULONG_PTR dwContinue)
 {
+  if(!hdcDraw || !prcBounds)
+    return E_POINTER;
   if (dwDrawAspect != DVASPECT_CONTENT) // unsupported
     return DV_E_DVASPECT;
   if (hicTargetDevice)
@@ -883,6 +990,8 @@ STDMETHODIMP tLuaControl::Draw(
   // paint (WM_PAINT)
   WNDPROC wndProc       = (WNDPROC)::GetWindowLongPtr(m_hwnd, GWLP_WNDPROC);
   if(!wndProc) wndProc = (WNDPROC)::GetWindowLongPtr(m_hwnd, DWLP_DLGPROC);
+  if(!wndProc)
+    return E_UNEXPECTED;
   ::CallWindowProc(wndProc, m_hwnd, WM_PAINT, (WPARAM)hdcDraw, 0);
 
   return S_OK;
@@ -895,6 +1004,10 @@ STDMETHODIMP tLuaControl::Draw(
 STDMETHODIMP tLuaControl::GetColorSet(DWORD dwDrawAspect, LONG lindex,
     void *IgnoreMe, DVTARGETDEVICE *ptd, HDC hicTargetDevice, LOGPALETTE **ppColorSet)
 {
+  if(!ppColorSet)
+    return E_POINTER;
+  *ppColorSet = NULL;
+
   if (dwDrawAspect != DVASPECT_CONTENT)
     return DV_E_DVASPECT;
 
@@ -907,6 +1020,9 @@ STDMETHODIMP tLuaControl::GetColorSet(DWORD dwDrawAspect, LONG lindex,
 */
 STDMETHODIMP tLuaControl::Freeze(DWORD dwDrawAspect, LONG lIndex, void *IgnoreMe, DWORD *pdwFreeze)
 {
+  if(!pdwFreeze)
+    return E_POINTER;
+  *pdwFreeze = 0;
   return E_NOTIMPL;
 }
 
@@ -1069,6 +1185,8 @@ STDMETHODIMP tLuaControl::InitNew()
 */
 STDMETHODIMP tLuaControl::GetSizeMax(ULARGE_INTEGER *pulMaxSize)
 {
+  if(!pulMaxSize)
+    return E_POINTER;
   return E_NOTIMPL;
 }
 

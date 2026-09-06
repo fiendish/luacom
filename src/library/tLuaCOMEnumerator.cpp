@@ -3,6 +3,8 @@
 */
 
 #include "tLuaCOMEnumerator.h"
+#include <math.h>
+#include <limits.h>
 
 #include "tUtil.h"
 #include "tCOMUtil.h"
@@ -198,26 +200,60 @@ int tLuaCOMEnumerator::callCOMmethod(lua_State* L, const char *name, int first_p
     unsigned long num_elements = 1;
     if(num_params > 0)
     {
-      num_elements = (unsigned long) lua_tonumber(L, first_param);
+      lua_Number requested = lua_tonumber(L, first_param);
+      CHECKPARAM(requested >= 0 &&
+                 requested <= static_cast<lua_Number>(ULONG_MAX) &&
+                 floor(requested) == requested);
+      num_elements = static_cast<unsigned long>(requested);
     }
 
-    VARIANT* pVar = new VARIANT[num_elements];
+    if(num_elements == 0)
+      return 0;
+
+    VARIANT* pVar = NULL;
+    try
+    {
+      pVar = new VARIANT[num_elements];
+    }
+    catch (...)
+    {
+      LUACOM_EXCEPTION(MALLOC_ERROR);
+    }
 
     for(unsigned long counter = 0; counter <  num_elements; counter++)
       VariantInit(&pVar[counter]);
 
     ULONG fetched = 0;
     hr = pEV->Next(num_elements, pVar, &fetched);
-    
-    for(unsigned long counter = 0; counter < fetched; counter++)
+    if(fetched > num_elements)
     {
-      typehandler->com2lua(L, pVar[counter]);
-      typehandler->releaseVariant(&pVar[counter]);
+      for(unsigned long counter = 0; counter < num_elements; counter++)
+        VariantClear(&pVar[counter]);
+      delete[] pVar;
+      LUACOM_EXCEPTION(INTERNAL_ERROR);
     }
 
-    for(unsigned long counter = 0; counter <  num_elements; counter++)
-      VariantClear(&pVar[counter]);
+    try
+    {
+      if(FAILED(hr))
+        CHK_COM_CODE(hr);
 
+      for(unsigned long counter = 0; counter < fetched; counter++)
+      {
+        typehandler->com2lua(L, pVar[counter]);
+        typehandler->releaseVariant(&pVar[counter]);
+      }
+    }
+    catch (...)
+    {
+      for(unsigned long counter = 0; counter < num_elements; counter++)
+        VariantClear(&pVar[counter]);
+      delete[] pVar;
+      throw;
+    }
+
+    for(unsigned long counter = 0; counter < num_elements; counter++)
+      VariantClear(&pVar[counter]);
     delete[] pVar;
 
     pVar = NULL;
@@ -237,7 +273,11 @@ int tLuaCOMEnumerator::callCOMmethod(lua_State* L, const char *name, int first_p
   {
     CHK_LCOM_ERR(num_params > 0, "Not enough parameters.");
 
-    unsigned long num_elements = (unsigned long) lua_tonumber(L, first_param);
+    lua_Number requested = lua_tonumber(L, first_param);
+    CHECKPARAM(requested >= 0 &&
+               requested <= static_cast<lua_Number>(ULONG_MAX) &&
+               floor(requested) == requested);
+    unsigned long num_elements = static_cast<unsigned long>(requested);
 
     hr = pEV->Skip(num_elements);
 
@@ -250,7 +290,15 @@ int tLuaCOMEnumerator::callCOMmethod(lua_State* L, const char *name, int first_p
     tCOMPtr<IEnumVARIANT> p_newEV;
     CHK_COM_CODE(pEV->Clone(&p_newEV));
 
-    tLuaCOMEnumerator* enumerator = new tLuaCOMEnumerator(p_newEV);
+    tLuaCOMEnumerator* enumerator = NULL;
+    try
+    {
+      enumerator = new tLuaCOMEnumerator(p_newEV);
+    }
+    catch (...)
+    {
+      LUACOM_EXCEPTION(MALLOC_ERROR);
+    }
     
     enumerator->push(L);
     return 1;

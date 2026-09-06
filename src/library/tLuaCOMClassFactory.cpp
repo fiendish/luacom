@@ -14,7 +14,10 @@ extern "C" {
 
 STDMETHODIMP
 tLuaCOMClassFactory::QueryInterface(REFIID iid, void** ppv) 
-{   
+{
+  if(!ppv)
+    return E_POINTER;
+
   *ppv = NULL;
 
   if (iid == IID_IUnknown || iid == IID_IClassFactory)
@@ -58,6 +61,9 @@ tLuaCOMClassFactory::CreateInstance(IUnknown* punkOuter,
                          REFIID riid,
                          void** ppv)
 {
+  if(!ppv)
+    return E_POINTER;
+
   HRESULT hr = E_NOTIMPL;
     
   *ppv = NULL;
@@ -81,8 +87,7 @@ tLuaCOMClassFactory::CreateInstance(IUnknown* punkOuter,
 STDMETHODIMP
 tLuaCOMClassFactory::LockServer(BOOL fLock)
 {    
-  CoLockObjectExternal(object, fLock, TRUE); 
-  return NOERROR;       
+  return CoLockObjectExternal(object, fLock, TRUE);
 }
 
 
