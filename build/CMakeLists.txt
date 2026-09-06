@@ -127,6 +127,7 @@ endif()
 # ------------------------------------------------------------------------------
 # luacom core DLL
 add_library(luacom SHARED)
+target_compile_features(luacom PRIVATE cxx_std_11)
 # setup lua include directory
 target_include_directories(luacom PRIVATE
   ${LIBLUA_INCLUDEDIR} ../src/library ../src/dll ../include
@@ -134,19 +135,19 @@ target_include_directories(luacom PRIVATE
 
 # Define absolute paths for the input Lua script and the generated loh-file
 set(LUACOM5_INPUT_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../src/library/luacom5.lua")
-set(LUACOM5_BYTECODE_FILE "${CMAKE_CURRENT_BINARY_DIR}/generated/luacom.loh")
+set(LUACOM5_HEADER_FILE "${CMAKE_CURRENT_BINARY_DIR}/generated/luacom.loh")
 
 # Define the generation rule: Converts the Lua script into a C-style hex array.
 # Ensure the loh-file is rebuilt if the Lua script or the converter script changes
 # VERBATIM ensures correct argument escaping for the Windows Shell/MSBuild
 add_custom_command(
-  OUTPUT "${LUACOM5_BYTECODE_FILE}"
+  OUTPUT "${LUACOM5_HEADER_FILE}"
   COMMAND ${CMAKE_COMMAND} 
   -DINPUT_FILE=${LUACOM5_INPUT_FILE}
-  -DOUTPUT_FILE=${LUACOM5_BYTECODE_FILE} 
+  -DOUTPUT_FILE=${LUACOM5_HEADER_FILE}
   -P "${CMAKE_CURRENT_SOURCE_DIR}/convert_lua_to_hex.cmake"
   DEPENDS "${LUACOM5_INPUT_FILE}" "${CMAKE_CURRENT_SOURCE_DIR}/convert_lua_to_hex.cmake"
-  COMMENT "Converting luacom5.lua to luacom5.loh..."
+  COMMENT "Converting luacom5.lua to luacom.loh..."
   VERBATIM
 )
 
@@ -161,16 +162,16 @@ target_sources(luacom PRIVATE
   ../src/library/LuaCompat.cpp ../src/library/tLuaCOMEnumerator.cpp
   ../src/library/tLuaObject.cpp ../src/library/tLuaControl.cpp ../src/library/tLuaTLB.cpp
   ../src/dll/luacom_dll.cpp ../src/dll/luacom_dll.def
-  ${LUACOM5_BYTECODE_FILE}
+  ${LUACOM5_HEADER_FILE}
 )
 
-# Mark luacom5.loh as generated so CMake doesn't look for it during the initial configuration
-set_source_files_properties("${LUACOM5_BYTECODE_FILE}" PROPERTIES GENERATED TRUE)
+# Mark luacom.loh as generated so CMake doesn't look for it during the initial configuration
+set_source_files_properties("${LUACOM5_HEADER_FILE}" PROPERTIES GENERATED TRUE)
 
 # Crucial for MSVC/MSBuild: Tells the compiler that luacom.cpp MUST be recompiled 
-# whenever luacom5.loh is updated. This bridges the gap between the custom command and
+# whenever luacom.loh is updated. This bridges the gap between the custom command and
 # the C++ build.
-set_source_files_properties(luacom.cpp PROPERTIES OBJECT_DEPENDS "${LUACOM5_BYTECODE_FILE}")
+set_source_files_properties(../src/library/luacom.cpp PROPERTIES OBJECT_DEPENDS "${LUACOM5_HEADER_FILE}")
 
 # Finally add path to generated file to include path list
 target_include_directories(luacom PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")

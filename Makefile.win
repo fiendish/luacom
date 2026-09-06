@@ -24,9 +24,6 @@ LUA_BINDIR      = $(LUA_BASE_DIR)\bin
 LUA_INCDIR      = $(LUA_BASE_DIR)\include
 LUA             = $(LUA_BINDIR)\$(LUA_INTERPRETER)
 
-LUAC            = $(LUA) mak\luac.lua
-BIN2C           = $(LUA) mak\bin2c.lua
-
 # ---------------------------------------------------------------------------
 # Local source directories.
 # ---------------------------------------------------------------------------
@@ -55,7 +52,8 @@ CFLAGS =$(CFLAGS) -MDd -Zi -Od -DLUA_USE_APICHECK
 CFLAGS =$(CFLAGS) -MD -Zi -O2 -DNDEBUG
 !ENDIF
 
-CPPFLAGS = /EHsc $(CFLAGS) $(INCS)
+# MSVC supports C++11 features in its C++14 language mode.
+CPPFLAGS = /std:c++14 /EHsc $(CFLAGS) $(INCS)
 
 LUA_LIBS = $(LUA_LIBDIR)/$(LUALIB)
 
@@ -140,8 +138,7 @@ clean:
 	if exist $(BIN_DIR)\*.manifest del $(BIN_DIR)\*.manifest
 	if exist $(BIN_DIR)\*.pdb      del $(BIN_DIR)\*.pdb
 	if exist $(BIN_DIR)            rmdir $(BIN_DIR)
-	if exist $(SRC_LIB_DIR)\luacom5.lo  del $(SRC_LIB_DIR)\luacom5.lo
-	if exist $(SRC_LIB_DIR)\luacom5.loh del $(SRC_LIB_DIR)\luacom5.loh
+	if exist $(SRC_LIB_DIR)\luacom.loh del $(SRC_LIB_DIR)\luacom.loh
 
 {$(SRC_LIB_DIR)}.cpp{$(OBJ_DIR)}.obj:
 	$(CC) /c /DLUACOM_DLL=\"luacom.dll\" $(CPPFLAGS) $(COMPAT) /Fo$@ $<
@@ -155,9 +152,8 @@ clean:
 {$(SRC_DLL_DIR)}.cpp{$(OBJ_DIR)}.obj:
 	$(CC) /c /DLUACOM_DLL=\"luacom.dll\" $(CPPFLAGS) $(COMPAT) /Fo$@ /I$(SRC_DLL_DIR) $<
 
-{$(SRC_LIB_DIR)}.lua{$(SRC_LIB_DIR)}.loh:
-	$(LUAC) -o "$*.lo" "$<"
-	$(BIN2C) "$*.lo" > "$@"
+$(SRC_LIB_DIR)\luacom.loh: $(SRC_LIB_DIR)\luacom5.lua mak\embed.lua
+	"$(LUA)" -e "dofile('mak/embed.lua'); main('src/library/luacom5.lua', 'src/library/luacom.loh')"
 
 $(LC_LIB): $(LIB_OBJS)
 	lib /NOLOGO /OUT:$@ $(LIB_OBJS)

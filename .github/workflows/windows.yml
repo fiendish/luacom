@@ -1,0 +1,63 @@
+name: Windows
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  connection-lifetime:
+    name: Connection lifetime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test connection lifetime with sanitizers
+        run: python3 src/test/connection_lifetime/run.py
+  build-and-test:
+    name: Lua ${{ matrix.lua }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lua: '5.1.5'
+            sha256: '2640fc56a795f29d28ef15e13c34a47e223960b0240e8cb0a82d9b0738695333'
+          - lua: '5.2.4'
+            sha256: 'b9e2e4aad6789b3b63a056d442f7b39f0ecfca3ae0f1fc0ae4e9614401b69f4b'
+          - lua: '5.3.6'
+            sha256: 'fc5fd69bb8736323f026672b1b7235da613d7177e72558893a0bdcd320466d60'
+          - lua: '5.4.9'
+            sha256: '2335b6c582a52654f94612bf10d2f4672805d05329aa6568b1d8cd9e5c6fb8e6'
+          - lua: '5.5.1'
+            sha256: '1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce'
+          - lua: 'LuaJIT'
+            sha256: ''
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ilammy/msvc-dev-cmd@a102174a2b586eec2ea151a69e6fd14404a8ce7c # v1.13.0
+        with:
+          arch: x64
+      - name: Build Lua
+        shell: pwsh
+        run: >-
+          ./.github/scripts/build-lua.ps1
+          -Version '${{ matrix.lua }}'
+          -Sha256 '${{ matrix.sha256 }}'
+          -Destination "$env:RUNNER_TEMP/lua"
+      - name: Configure LuaCOM
+        shell: pwsh
+        run: >-
+          cmake -S . -B build-ci -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          "-DLUA_INCLUDE_DIR=$env:LUA_INCLUDE_DIR"
+          "-DLUA_LIBRARY=$env:LUA_LIBRARY"
+          "-DLUA_EXECUTABLE=$env:LUA_EXECUTABLE"
+          "-DLUA=$env:LUA_EXECUTABLE"
+      - name: Build LuaCOM
+        run: cmake --build build-ci
+      - name: Test LuaCOM
+        run: ctest --test-dir build-ci --output-on-failure --no-tests=error -R "luacom_(roundtrip|smoke)_tests"

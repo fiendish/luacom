@@ -4,6 +4,17 @@ add_requires("lua 5.4", {configs = {shared = true}})
 
 target 'luacom'
     set_kind("shared")
+    set_languages("cxx11")
+    on_load(function (target)
+        target:add("includedirs", path.join(target:autogendir(), "include"))
+    end)
+    before_build(function (target)
+        local generated_dir = path.join(target:autogendir(), "include")
+        os.mkdir(generated_dir)
+        import("mak.embed", {rootdir = os.projectdir()}).main(
+            path.join(os.projectdir(), "src/library/luacom5.lua"),
+            path.join(generated_dir, "luacom.loh"))
+    end)
     add_packages('lua')
 
     -- add files

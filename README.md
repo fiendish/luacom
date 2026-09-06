@@ -32,6 +32,14 @@ The following "ahead" branches have been merged into this master:
 -   **New Methods:** Added `luacom.ReleaseComObject(obj)` for manual reference control when dealing with non-standard COM servers.
 -   **Unicode/Codepage:** Improved UTF-8 and ANSI codepage handling.
 
+## MUSHclient fixes
+
+This fork includes the shared native fixes from [MUSHclient PR 8](https://github.com/fiendish/mushclient/pull/8). These changes keep COM objects alive during callbacks, track event subscriptions, check metadata, and release partial conversion results on failure. They also preserve exact 64-bit integer values and route `RoundTrip` conversion errors through `luacom.config.abort_on_API_error` and `luacom.config.last_error`.
+
+The standalone DLL retains its Lua helpers, in-process server registration, and message loop. `releaseConnection(obj)` releases only the last connection made. Repeated calls do not release older connections. `ReleaseComObject` and garbage collection attempt to release all tracked subscriptions.
+
+A compiler with C++11 support is required. The NMake build uses the MSVC C++14 mode. The CMake, NMake, and xmake builds embed Lua source so the helper code uses the same Lua runtime as the DLL.
+
 ## Fork Lineage
 As identified by an automated fork-tree analysis, the fragmented state of the project prior to consolidation is illustrated below. Many isolated improvements, which had never been combined, were found to be contained within these forks.
 ```txt

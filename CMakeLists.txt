@@ -21,7 +21,11 @@ include_directories ( include src/dll src/library ${CMAKE_CURRENT_BINARY_DIR} )
 #          # On MinGW and Wine, htmlhelp.h may exist but not htmlhelp.lib.
 #   CHECK_LIBRARY_EXISTS(htmlhelp HtmlHelpA "" HAVE_HTMLHELP) # detection fails in MSVC
 set ( CMAKE_REQUIRED_LIBRARIES htmlhelp )
-check_c_source_compiles ( " #include <windows.h> #include <htmlhelp.h> int main() { HtmlHelp(NULL, NULL, HH_HELP_CONTEXT, 0); return 0; } " 
+check_c_source_compiles ( "
+#include <windows.h>
+#include <htmlhelp.h>
+int main() { HtmlHelp(NULL, NULL, HH_HELP_CONTEXT, 0); return 0; }
+"
   HAVE_HTMLHELP )
 set ( CMAKE_REQUIRED_LIBRARIES )
 if ( NOT HAVE_HTMLHELP )
@@ -63,17 +67,27 @@ if ( HAVE_HTMLHELP )
   set ( LIBS ${LIBS} htmlhelp )
 endif ( )
 
-add_lua_bin2c ( ${CMAKE_CURRENT_BINARY_DIR}/luacom5.loh src/library/luacom5.lua ${CMAKE_CURRENT_SOURCE_DIR}/mak/bin2c.lua 
-  ${CMAKE_CURRENT_SOURCE_DIR}/mak/luac.lua )
-set_source_files_properties ( src/library/luacom.cpp PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/luacom5.loh )
+set ( LUACOM_LUA_HEADER "${CMAKE_CURRENT_BINARY_DIR}/luacom.loh" )
+add_custom_command (
+  OUTPUT "${LUACOM_LUA_HEADER}"
+  COMMAND "${CMAKE_COMMAND}"
+    "-DINPUT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/library/luacom5.lua"
+    "-DOUTPUT_FILE=${LUACOM_LUA_HEADER}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/build/convert_lua_to_hex.cmake"
+  DEPENDS src/library/luacom5.lua build/convert_lua_to_hex.cmake
+  VERBATIM
+)
+set_source_files_properties ( src/library/luacom.cpp PROPERTIES OBJECT_DEPENDS "${LUACOM_LUA_HEADER}" )
 
 set ( SRC_DLL src/dll/luacom_dll.cpp )
 add_definitions ( -DLUACOM_DLL="luacom.dll" )
 
-install_lua_module ( luacom ${SRC_DLL} ${SRC_LIB} src/dll/luacom_dll.def LINK ${LIBS} )
+install_lua_module ( luacom ${SRC_DLL} ${SRC_LIB} src/dll/luacom_dll.def "${LUACOM_LUA_HEADER}" LINK ${LIBS} )
+target_compile_features ( luacom PRIVATE cxx_std_11 )
 install_data ( README COPYRIGHT announce.txt todo.txt )
 install_doc ( doc/luacom.gif doc/luacom.pdf www/index.html )
 install_example ( demo/ )
 
 add_lua_test ( ${CMAKE_CURRENT_SOURCE_DIR}/src/test/luacom_tests5.lua )
 add_lua_test ( ${CMAKE_CURRENT_SOURCE_DIR}/src/test/luacom_roundtrip_tests.lua )
+add_lua_test ( ${CMAKE_CURRENT_SOURCE_DIR}/src/test/luacom_smoke_tests.lua )
