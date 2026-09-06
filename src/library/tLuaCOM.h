@@ -8,6 +8,8 @@
 
 #include <ole2.h>
 #include <ocidl.h> 
+#include <vector>
+#include <list>
 
 extern "C"
 {
@@ -24,15 +26,16 @@ enum tWhichInterface {DISP, SOURCE};
 
 // Types of FUNCDESC
 
-#define MAX_FUNCINFOS 150
-
 struct FuncInfo
 {
   char*     name;
 
   FUNCDESC* propget;
+  ITypeInfo* propget_owner;
   FUNCDESC* propput;
+  ITypeInfo* propput_owner;
   FUNCDESC* func;
+  ITypeInfo* func_owner;
 };
 
 
@@ -46,7 +49,7 @@ public:
   CLSID GetCLSID(void);
   void GetIID(IID *piid);
   IDispatch * GetIDispatch(void);
-  void ReleaseFuncDesc(FUNCDESC *pfuncdesc);
+  void ReleaseFuncDesc(ITypeInfo *owner, FUNCDESC *pfuncdesc);
   ITypeInfo * GetDefaultEventsInterface(void);
   const char* GetObjName() const { return objName; }
   static tLuaCOM * CreateLuaCOM(
@@ -66,7 +69,7 @@ public:
    DWORD addConnection(tLuaCOM *client);
    void releaseConnection(tLuaCOM* server, DWORD cookie);
    void releaseConnection();
-   void releaseConnections(void);
+   HRESULT releaseConnections(void);
 
    int call(
      lua_State* L, 
@@ -86,8 +89,19 @@ protected:
   tCOMPtr<ITypeComp> plib_tcomp;
   long lock_count;
   CLSID clsid;
-  IConnectionPoint *conn_point;
-  DWORD conn_cookie;
+  struct Connection
+  {
+    Connection(IConnectionPoint *point, const IID& interface_id)
+      : point(point), interface_id(interface_id), cookie(0) {}
+
+    tCOMPtr<IConnectionPoint> point;
+    IID interface_id;
+    DWORD cookie;
+  };
+  typedef std::list<Connection> ConnectionList;
+  ConnectionList connections;
+  IID last_connection_interface;
+  DWORD last_connection_cookie;
 
   tLuaCOM(
     lua_State* L,
@@ -105,8 +119,12 @@ protected:
   // struct to hold all type information for a
   // member
 
-  FuncInfo pFuncInfo[MAX_FUNCINFOS];
+  std::vector<FuncInfo> mFuncInfo;
 private:
+  struct CallContext;
+  static int protectedCall(lua_State* L);
+  int callWithDispatch(lua_State* L, CallContext& context);
+  void checkComObject() const;
   long ID;
   char* objName;
 };

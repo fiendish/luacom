@@ -1,15 +1,19 @@
 local luacom = require("luacom")
+local config = luacom.config
+assert(type(config) == "table")
 
 local original_table_variants = luacom.TableVariants
 local original_date_format = luacom.DateFormat
 local original_code_page = luacom.GetCodepage()
+local original_abort_on_api_error = config.abort_on_API_error
+local original_last_error = config.last_error
 
 local function roundtrip_variant(variant_type, value)
   luacom.TableVariants = true
   local result = luacom.RoundTrip({Type = variant_type, Value = value})
-  assert(type(result) == "table")
-  assert(result.Type == variant_type)
-  return result.Value
+  -- RoundTrip returns the scalar value, even when TableVariants is enabled.
+  assert(type(result) ~= "table")
+  return result
 end
 
 assert(roundtrip_variant("int8", -42) == -42)
@@ -41,6 +45,113 @@ if math.type and math.maxinteger and math.maxinteger > 9007199254740992 then
   assert(math.type(signed_array[2]) == "integer")
   assert(math.type(unsigned_array[1]) == "integer")
 end
+
+for _, value in ipairs({
+  {"int1", -128, 127},
+  {"uint1", 0, 255},
+  {"int2", -32768, 32767},
+  {"uint2", 0, 65535},
+  {"int4", -2147483648, 2147483647},
+  {"uint4", 0, 4294967295},
+  {"int", -2147483648, 2147483647},
+  {"uint", 0, 4294967295},
+}) do
+  assert(roundtrip_variant(value[1], value[2]) == value[2])
+  assert(roundtrip_variant(value[1], value[3]) == value[3])
+  assert(roundtrip_variant(value[1], tostring(value[3])) == value[3])
+end
+
+for _, value in ipairs({
+  {"int8", "-9223372036854775808"},
+  {"int8", "9223372036854775807"},
+  {"uint8", "18446744073709551615"},
+}) do
+  assert(tostring(roundtrip_variant(value[1], value[2])) == value[2])
+end
+
+local exact_string_array = luacom.RoundTrip({
+  Type = "array of int8",
+  Value = {"-9223372036854775808", "9223372036854775807"},
+})
+assert(tostring(exact_string_array[1]) == "-9223372036854775808")
+assert(tostring(exact_string_array[2]) == "9223372036854775807")
+
+local unsigned_string_array = luacom.RoundTrip({
+  Type = "array of uint8",
+  Value = {"18446744073709551615"},
+})
+assert(unsigned_string_array[1] == "18446744073709551615")
+
+for _, value in ipairs({
+  {"array of int1", {-128, 127}},
+  {"array of uint2", {0, 65535}},
+  {"array of uint4", {0, 4294967295}},
+  {"array of uint", {0, 4294967295}},
+  {"array of string", {"first", "second"}},
+}) do
+  local result = luacom.RoundTrip({Type = value[1], Value = value[2]})
+  assert(#result == #value[2])
+  for index, expected in ipairs(value[2]) do
+    assert(result[index] == expected)
+  end
+end
+
+local empty_array = luacom.RoundTrip({Type = "array", Value = {}})
+assert(type(empty_array) == "table" and next(empty_array) == nil)
+
+luacom.SetCodepage(65001)
+for _, value in ipairs({"", "plain text", "A\0B", "caf\195\169"}) do
+  assert(luacom.RoundTrip(value) == value)
+end
+assert(luacom.RoundTrip({Type = "string", Value = "typed text"}) == "typed text")
+luacom.SetCodepage(original_code_page)
+
+assert(luacom.RoundTrip(true) == true)
+assert(luacom.RoundTrip(false) == false)
+assert(select("#", luacom.RoundTrip(nil)) == 1)
+assert(luacom.RoundTrip(nil) == nil)
+
+local success_error_sentinel = "round-trip success sentinel"
+config.last_error = success_error_sentinel
+assert(luacom.RoundTrip("valid with saved error") == "valid with saved error")
+assert(luacom.config == config)
+assert(config.last_error == success_error_sentinel)
+
+config.abort_on_API_error = true
+for _, value in ipairs({
+  {"int1", 128},
+  {"uint1", -1},
+  {"int2", 32768},
+  {"uint2", 65536},
+  {"int4", 2147483648},
+  {"uint4", 4294967296},
+  {"int", 0.5},
+  {"uint", -1},
+  {"int8", "9223372036854775808"},
+  {"int8", "-9223372036854775809"},
+  {"uint8", "18446744073709551616"},
+  {"uint8", -1},
+  {"int8", "not an integer"},
+  {"int8", 0.5},
+}) do
+  local ok, message = pcall(luacom.RoundTrip, {Type = value[1], Value = value[2]})
+  assert(not ok)
+  assert(type(message) == "string" and #message > 0)
+  assert(luacom.config == config)
+  local reported_error = config.last_error
+  assert(type(reported_error) == "string" and #reported_error > 0)
+  assert(luacom.RoundTrip("valid after error") == "valid after error")
+  assert(config.last_error == reported_error)
+end
+
+config.abort_on_API_error = false
+assert(select("#", luacom.RoundTrip({Type = "int4", Value = 0.5})) == 0)
+assert(luacom.config == config)
+local reported_error = config.last_error
+assert(type(reported_error) == "string" and #reported_error > 0)
+assert(luacom.RoundTrip("valid after reported error") == "valid after reported error")
+assert(config.last_error == reported_error)
+config.abort_on_API_error = original_abort_on_api_error
 
 local date = {
   Year = 2024,
@@ -155,5 +266,8 @@ assert(luacom.GetCodepage() == original_code_page)
 
 luacom.TableVariants = original_table_variants
 luacom.DateFormat = original_date_format
+assert(luacom.config == config)
+config.abort_on_API_error = original_abort_on_api_error
+config.last_error = original_last_error
 
 print("LuaCOM round-trip tests passed")
