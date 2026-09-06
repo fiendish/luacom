@@ -1521,8 +1521,9 @@ static int luacom_GetEnumerator(lua_State *L)
   int retvals = 0;
   try
   {
-    retvals = 
-      luacom->call(L, DISPID_NEWENUM, INVOKE_PROPERTYGET, NULL, tLuaObjList());
+    // Collections expose _NewEnum as either a method or a property.
+    retvals = luacom->call(L, DISPID_NEWENUM,
+      INVOKE_FUNC | INVOKE_PROPERTYGET, NULL, tLuaObjList());
     CHECKPOSCOND(retvals != 0);
   }
   catch(class tLuaCOMException& e)

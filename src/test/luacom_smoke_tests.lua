@@ -26,6 +26,20 @@ for _, key in luacom.pairs(dictionary) do
 end
 assert(keys.first and keys.second)
 
+-- File collections also expose enumeration through a property.
+local filesystem = assert(luacom.CreateInprocObject("Scripting.FileSystemObject"))
+local folder = filesystem:GetFolder(".")
+local files = folder.Files
+local file_count = 0
+for _, file in luacom.pairs(files) do
+  assert(type(file.Name) == "string" and #file.Name > 0)
+  file_count = file_count + 1
+end
+assert(file_count > 0 and file_count == files.Count)
+luacom.ReleaseComObject(files)
+luacom.ReleaseComObject(folder)
+luacom.ReleaseComObject(filesystem)
+
 local typeinfo = assert(luacom.GetTypeInfo(dictionary))
 assert(luacom.GetType(typeinfo) == "ITypeInfo")
 assert(type(typeinfo:GetDocumentation()) == "table")
