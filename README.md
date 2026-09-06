@@ -18,6 +18,7 @@ The following "ahead" branches have been merged into this master:
 *   **[shere-avintec/luacom](https://github.com/shere-avintec/luacom) (+1 commit):** CI/CD environment optimizations.
 *   **[JoshuaTiffany/luacom](https://github.com/JoshuaTiffany/luacom) (+1 commit):** Metadata and build-info updates.
 *   **[Cr4xy/luacom](https://github.com/Cr4xy/luacom):** Added date rounding, COM ownership fixes, record conversion, thread-local code pages, and 64-bit variant handling.
+*   **[OneLuaPro/luacom](https://github.com/OneLuaPro/luacom):** Added the CMake build environment in `build`.
 
 ## Key Features & Improvements
 
