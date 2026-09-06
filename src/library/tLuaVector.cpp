@@ -62,7 +62,7 @@ stkIndex tLuaVector::getindex(long * indices,
 
   const long index = indices[0] - bounds[0].lLbound;
 
-  CHECKPARAM(index < (long)length);
+  CHECKPARAM(index >= 0 && index < (long)length);
 
   if(size > 1)
   {
@@ -208,7 +208,7 @@ void tLuaVector::setindex(lua_State* L,
 
   const long index = indices[0] - bounds[0].lLbound;
 
-  CHECKPARAM(index < (long)length);
+  CHECKPARAM(index >= 0 && index < (long)length);
 
   if(size > 1)
   {
@@ -238,6 +238,7 @@ void tLuaVector::InitVectorFromDimensions(long * dimensions,
 {
   CHECKPRECOND(initialized != true);
   CHECKPARAM(dimensions != NULL && num_dimensions != 0);
+  CHECKPARAM(dimensions[0] >= 0);
 
   length = 0;
   vectors = NULL;
@@ -249,17 +250,19 @@ void tLuaVector::InitVectorFromDimensions(long * dimensions,
   if(num_dimensions == 1)
   {
     elem_type = SCALAR;
-    length = max_length = dimensions[0];
+    max_length = dimensions[0];
 
-    luavals = new stkIndex[length];
+    luavals = new stkIndex[max_length];
     assert(luavals);
 
     {
       unsigned long i = 0;
 
-      for(i = 0; i < length; i++)
+      for(i = 0; i < max_length; i++)
         luavals[i] = LUA_NOOBJECT;
     }
+
+    length = max_length;
 
     // cria array de luavals e inicializa resto
 
@@ -268,19 +271,28 @@ void tLuaVector::InitVectorFromDimensions(long * dimensions,
   else
   {
     elem_type = VECTOR;
-    length = max_length = dimensions[0];
+    max_length = dimensions[0];
 
-    vectors = new tLuaVector*[length];
+    vectors = new tLuaVector*[max_length];
 
     // inicializa vetores recursivamente
 
     {
       unsigned long i = 0;
 
-      for(i = 0; i < length; i++)
+      for(i = 0; i < max_length; i++)
       {
-        vectors[i] = new tLuaVector();
-        vectors[i]->InitVectorFromDimensions(&dimensions[1], num_dimensions - 1);
+        tLuaVector * child = new tLuaVector();
+        try
+        {
+          child->InitVectorFromDimensions(&dimensions[1], num_dimensions - 1);
+        }
+        catch (...)
+        {
+          delete child;
+          throw;
+        }
+        vectors[length++] = child;
       }
     }
 
@@ -380,12 +392,19 @@ void tLuaVector::InitVectorFromTable(lua_State* L, stkIndex table)
           vectors = new_vectors;
         }
 
-        // obtem novo vetor
-        vectors[length] = new tLuaVector();
+        // obtain and initialize the new vector before publishing it
+        tLuaVector * child = new tLuaVector();
+        try
+        {
+          child->InitVectorFromTable(L, luaval);
+        }
+        catch (...)
+        {
+          delete child;
+          throw;
+        }
 
-        vectors[length]->InitVectorFromTable(L, luaval);
-
-        length++;
+        vectors[length++] = child;
 
         // caso nova tabela tenha dimensao diferente, aborta processo
         // (nao e' uma matriz)
