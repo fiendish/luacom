@@ -1,10 +1,13 @@
 """Check connection ownership with the patched source and substitute COM objects."""
+import argparse
 from pathlib import Path
 import subprocess
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1] / 'library'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--source-dir', type=Path, default=HERE.parents[1] / 'library')
+ROOT = parser.parse_args().source_dir.resolve()
 
 def extract(text, signature):
     start = text.index(signature)
