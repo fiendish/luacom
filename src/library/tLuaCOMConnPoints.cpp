@@ -64,7 +64,17 @@ tLuaCOMEnumConnPoints::~tLuaCOMEnumConnPoints()
 HRESULT tLuaCOMEnumConnPoints::Init(
     const std::vector<tCOMPtr<IConnectionPoint> > & points, ULONG nextIndex)
 {
-  mPoints.assign(mPoints.begin(), mPoints.end());
+  if(nextIndex > points.size())
+    return E_INVALIDARG;
+
+  try
+  {
+    mPoints.assign(points.begin(), points.end());
+  }
+  catch (...)
+  {
+    return E_OUTOFMEMORY;
+  }
   mNextIndex = nextIndex;
   return S_OK;
 }
@@ -75,6 +85,9 @@ HRESULT tLuaCOMEnumConnPoints::Init(
 */
 STDMETHODIMP tLuaCOMEnumConnPoints::QueryInterface(REFIID riid, void ** ppv)
 {
+  if(!ppv)
+    return E_POINTER;
+
   *ppv = (riid == IID_IUnknown || riid == IID_IEnumConnectionPoints) ?
          static_cast<void*>(this) : NULL;
   if (! *ppv)
@@ -99,13 +112,14 @@ STDMETHODIMP_(ULONG) tLuaCOMEnumConnPoints::AddRef()
 */
 STDMETHODIMP_(ULONG) tLuaCOMEnumConnPoints::Release()
 {
+  ULONG refs = --mRefCount;
   mpHost->Release();
-  if (--mRefCount == 0)
+  if (refs == 0)
   {
-    mRefCount++;
     delete this;
+    return 0;
   }
-  return mRefCount;
+  return refs;
 }
 
 
@@ -118,10 +132,20 @@ STDMETHODIMP tLuaCOMEnumConnPoints::Next(
   // check args
   if (! paConnPts)
     return E_POINTER;
-  if (!(mNextIndex < mPoints.size()))
-    return S_FALSE;
   if (!pcEnumerated && cReq != 1)
     return E_POINTER;
+  if (cReq == 0)
+  {
+    if (pcEnumerated)
+      *pcEnumerated = 0;
+    return S_OK;
+  }
+  if (!(mNextIndex < mPoints.size()))
+  {
+    if (pcEnumerated)
+      *pcEnumerated = 0;
+    return S_FALSE;
+  }
 
   // copy
   size_t i = 0;
@@ -133,7 +157,7 @@ STDMETHODIMP tLuaCOMEnumConnPoints::Next(
   if (pcEnumerated)
     *pcEnumerated = i;
 
-  return S_OK;
+  return i == cReq ? S_OK : S_FALSE;
 }
 
 
@@ -142,8 +166,12 @@ STDMETHODIMP tLuaCOMEnumConnPoints::Next(
 */
 STDMETHODIMP tLuaCOMEnumConnPoints::Skip(ULONG cSkip)
 {
-  if (!(mNextIndex + cSkip < mPoints.size()))
+  size_t remaining = mPoints.size() - mNextIndex;
+  if (cSkip > remaining)
+  {
+    mNextIndex = static_cast<ULONG>(mPoints.size());
     return S_FALSE;
+  }
   mNextIndex += cSkip;
   return S_OK;
 }
@@ -164,14 +192,27 @@ STDMETHODIMP tLuaCOMEnumConnPoints::Reset()
 */
 STDMETHODIMP tLuaCOMEnumConnPoints::Clone(IEnumConnectionPoints** ppIEnum)
 {
+  if(!ppIEnum)
+    return E_POINTER;
+
   HRESULT hr;
   
   *ppIEnum = NULL;
-  tLuaCOMEnumConnPoints* penumcp = new tLuaCOMEnumConnPoints(mpHost); // E_OUTOFMEMORY
+  tLuaCOMEnumConnPoints* penumcp = NULL;
+  try
+  {
+    penumcp = new tLuaCOMEnumConnPoints(mpHost);
+  }
+  catch (...)
+  {
+    return E_OUTOFMEMORY;
+  }
   hr = penumcp->Init(mPoints, mNextIndex);
   if (SUCCEEDED(hr))
     hr = penumcp->QueryInterface(
           IID_IEnumConnectionPoints, reinterpret_cast<void **>(ppIEnum));
+  if (FAILED(hr))
+    delete penumcp;
 
   return hr;
 }
@@ -188,11 +229,10 @@ STDMETHODIMP tLuaCOMEnumConnPoints::Clone(IEnumConnectionPoints** ppIEnum)
   Constructor.
 */
 tLuaCOMConnPoint::tLuaCOMConnPoint(lua_State *p_L, IUnknown* pHost) :
-  L(p_L),
-  mRefCount(0),
   mpHost(pHost),
   mNextCookie(COOKIE_START_VALUE),
-  mConnections(), mCookies()
+  mConnections(), mCookies(),
+  L(p_L)
 {
   // creates a new lua tag associated with this connection point
   luaCompat_pushTypeByName(L, MODULENAME, LCOM_CONNPOINT_TYPENAME);
@@ -213,10 +253,15 @@ tLuaCOMConnPoint::~tLuaCOMConnPoint()
 
 HRESULT tLuaCOMConnPoint::Init(REFIID rIIDSink, ITypeInfo *pTypeinfo)
 {
+  for(size_t i = 0; i < mSinks.size(); ++i)
+    if(mSinks[i])
+      mSinks[i]->Unlock();
+
   mIIDSink = rIIDSink;
-  mpTypeinfo = pTypeinfo;
+  mpTypeinfo = tCOMPtr<ITypeInfo>(pTypeinfo);
   mConnections.clear();
   mCookies.clear();
+  mSinks.clear();
   return S_OK;
 }
 
@@ -224,6 +269,9 @@ HRESULT tLuaCOMConnPoint::Init(REFIID rIIDSink, ITypeInfo *pTypeinfo)
 
 STDMETHODIMP tLuaCOMConnPoint::QueryInterface(REFIID riid, void ** ppv)
 {
+  if(!ppv)
+    return E_POINTER;
+
   HRESULT hr = E_NOINTERFACE;
 
   *ppv = NULL;
@@ -241,18 +289,13 @@ STDMETHODIMP tLuaCOMConnPoint::QueryInterface(REFIID riid, void ** ppv)
 
 STDMETHODIMP_(ULONG) tLuaCOMConnPoint::AddRef()
 {
-  return ++mRefCount;
+  return mpHost->AddRef();
 }
 
 
 STDMETHODIMP_(ULONG) tLuaCOMConnPoint::Release()
 {
-  if (--mRefCount == 0)
-  {
-    mRefCount++;
-    delete this;
-  }
-  return mRefCount;
+  return mpHost->Release();
 }
 
 
@@ -274,6 +317,9 @@ STDMETHODIMP tLuaCOMConnPoint::GetConnectionInterface(IID* pIIDSink)
 STDMETHODIMP tLuaCOMConnPoint::GetConnectionPointContainer(
     IConnectionPointContainer** ppConnPtCon)
 {
+  if(!ppConnPtCon)
+    return E_POINTER;
+
   HRESULT hr = mpHost->QueryInterface(
       IID_IConnectionPointContainer, reinterpret_cast<void **>(ppConnPtCon));
   return hr;
@@ -287,6 +333,9 @@ STDMETHODIMP tLuaCOMConnPoint::Advise(IUnknown* pUnkSink, DWORD* pdwCookie)
 {
   HRESULT hr;
 
+  if(!pUnkSink || !pdwCookie)
+    return E_POINTER;
+
   *pdwCookie = 0;
 
   tCOMPtr<IDispatch> psink;
@@ -294,28 +343,53 @@ STDMETHODIMP tLuaCOMConnPoint::Advise(IUnknown* pUnkSink, DWORD* pdwCookie)
   if (FAILED(hr))
      return CONNECT_E_CANNOTCONNECT;
 
-  // find or create free location
+  // find a free location and reserve all parallel storage before creating the sink
   std::vector<DWORD>::iterator free = std::find(mCookies.begin(), mCookies.end(), 0);
-  if (free == mCookies.end())
+  bool append = free == mCookies.end();
+  size_t ifree = append ? mCookies.size() : free - mCookies.begin();
+
+  if(append)
+  {
+    try
     {
-    // create free location
-    mConnections.push_back(tCOMPtr<IUnknown>());
-    mCookies.push_back(0);
-    mSinks.push_back(NULL);
-    free = mCookies.end() - 1;
+      mConnections.reserve(mConnections.size() + 1);
+      mCookies.reserve(mCookies.size() + 1);
+      mSinks.reserve(mSinks.size() + 1);
     }
-  size_t ifree = free - mCookies.begin();
+    catch (...)
+    {
+      return E_OUTOFMEMORY;
+    }
+  }
 
-  // insert
-  mConnections[ifree] = tCOMPtr<IUnknown>(psink.Raw());
-  mCookies[ifree] = mNextCookie;
-
-  // VB supplies a very weird type info, so we stay with ours,
-  // as it's where VB will look for the DISPID's anyway
+  tLuaCOM * sink = NULL;
   try
-  { mSinks[ifree] = tLuaCOM::CreateLuaCOM(L, psink, IID_NULL, mpTypeinfo); }
+  {
+    // VB supplies unusual type information, so use the source interface type information.
+    sink = tLuaCOM::CreateLuaCOM(L, psink, IID_NULL, mpTypeinfo);
+  }
   catch(class tLuaCOMException&)
-  { return CONNECT_E_CANNOTCONNECT; }
+  {
+    return CONNECT_E_CANNOTCONNECT;
+  }
+  catch (...)
+  {
+    return E_OUTOFMEMORY;
+  }
+
+  // Commit all parallel state only after sink creation succeeds.
+  if(append)
+  {
+    mConnections.push_back(tCOMPtr<IUnknown>(psink.Raw()));
+    mCookies.push_back(mNextCookie);
+    mSinks.push_back(sink);
+  }
+  else
+  {
+    mConnections[ifree] = tCOMPtr<IUnknown>(psink.Raw());
+    mCookies[ifree] = mNextCookie;
+    mSinks[ifree] = sink;
+  }
 
   *pdwCookie = mNextCookie;
   mNextCookie++;
@@ -336,13 +410,15 @@ STDMETHODIMP tLuaCOMConnPoint::Unadvise(DWORD dwCookie)
   std::vector<DWORD>::iterator it
       = std::find(mCookies.begin(), mCookies.end(), dwCookie);
   if (it == mCookies.end())
-    return S_OK;  // [or E_POINTER?] not found
+    return CONNECT_E_NOCONNECTION;
   size_t pos = it - mCookies.begin();
 
   // remove it
   mConnections[pos].Release();  
   mCookies[pos] = 0;
-  mSinks[pos]->Unlock(); mSinks[pos] = NULL;
+  if(mSinks[pos])
+    mSinks[pos]->Unlock();
+  mSinks[pos] = NULL;
 
   return S_OK;
 }
@@ -353,28 +429,49 @@ STDMETHODIMP tLuaCOMConnPoint::Unadvise(DWORD dwCookie)
 */
 STDMETHODIMP tLuaCOMConnPoint::EnumConnections(IEnumConnections** ppIEnum)
 {
+  if(!ppIEnum)
+    return E_POINTER;
+
   HRESULT hr;
   *ppIEnum = NULL;
 
   // copy only non-empty elements
   std::vector<tCOMPtr<IUnknown> > connections;
   std::vector<DWORD> cookies;
-  for (size_t i=0, j=0; i < mConnections.size(); i++)
+  try
   {
-    if (mCookies[i] != 0)
+    connections.reserve(mConnections.size());
+    cookies.reserve(mCookies.size());
+    for (size_t i=0; i < mConnections.size(); i++)
     {
-      connections.push_back(mConnections[i]);
-      cookies.push_back(mCookies[i]);
-      j++;
+      if (mCookies[i] != 0)
+      {
+        connections.push_back(mConnections[i]);
+        cookies.push_back(mCookies[i]);
+      }
     }
+  }
+  catch (...)
+  {
+    return E_OUTOFMEMORY;
   }
 
   // create IEnumConnections.
-  tLuaCOMEnumConnections* penumc = new tLuaCOMEnumConnections(this); // E_OUTOFMEMORY
+  tLuaCOMEnumConnections* penumc = NULL;
+  try
+  {
+    penumc = new tLuaCOMEnumConnections(this);
+  }
+  catch (...)
+  {
+    return E_OUTOFMEMORY;
+  }
   hr = penumc->Init(connections, cookies, 0);
   if (SUCCEEDED(hr))
     hr = penumc->QueryInterface(
           IID_IEnumConnections, reinterpret_cast<void **>(ppIEnum));
+  if (FAILED(hr))
+    delete penumc;
 
   return hr;
 }
@@ -414,8 +511,22 @@ HRESULT tLuaCOMEnumConnections::Init(
     std::vector<tCOMPtr<IUnknown> > & connections,
     std::vector<DWORD> & cookies, ULONG nextIndex)
 {
-  mConnections = connections;   // E_OUTOFMEMORY
-  mCookies = cookies;
+  if(connections.size() != cookies.size())
+    return E_INVALIDARG;
+  if(nextIndex > connections.size())
+    return E_INVALIDARG;
+
+  try
+  {
+    mConnections = connections;
+    mCookies = cookies;
+  }
+  catch (...)
+  {
+    mConnections.clear();
+    mCookies.clear();
+    return E_OUTOFMEMORY;
+  }
   mNextIndex = nextIndex;
   return S_OK;
 }
@@ -427,6 +538,9 @@ HRESULT tLuaCOMEnumConnections::Init(
 STDMETHODIMP tLuaCOMEnumConnections::QueryInterface(
     REFIID riid, void ** ppv)
 {
+  if(!ppv)
+    return E_POINTER;
+
   if (riid == IID_IUnknown || riid == IID_IEnumConnections)
     *ppv = static_cast<void*>(this);
   else
@@ -457,13 +571,14 @@ STDMETHODIMP_(ULONG) tLuaCOMEnumConnections::AddRef()
 */
 STDMETHODIMP_(ULONG) tLuaCOMEnumConnections::Release()
 {
+  ULONG refs = --mRefCount;
   mpHost->Release();
-  if (--mRefCount == 0)
+  if (refs == 0)
   {
-    mRefCount++;
     delete this;
+    return 0;
   }
-  return mRefCount;
+  return refs;
 }
 
 
@@ -478,9 +593,16 @@ STDMETHODIMP tLuaCOMEnumConnections::Next(
     return E_POINTER;
   if (!pcEnumerated && cReq != 1)
     return E_POINTER;
+  if (cReq == 0)
+  {
+    if (pcEnumerated)
+      *pcEnumerated = 0;
+    return S_OK;
+  }
   if (!(mNextIndex < mConnections.size()))
     {
-    *pcEnumerated = 0;
+    if (pcEnumerated)
+      *pcEnumerated = 0;
     return S_FALSE;
     }
 
@@ -497,7 +619,7 @@ STDMETHODIMP tLuaCOMEnumConnections::Next(
   if (pcEnumerated)
     *pcEnumerated = i;
 
-  return S_OK;
+  return i == cReq ? S_OK : S_FALSE;
 }
 
 
@@ -506,8 +628,12 @@ STDMETHODIMP tLuaCOMEnumConnections::Next(
 */
 STDMETHODIMP tLuaCOMEnumConnections::Skip(ULONG cSkip)
 {
-  if (!(mNextIndex + cSkip < mConnections.size()))
+  size_t remaining = mConnections.size() - mNextIndex;
+  if (cSkip > remaining)
+  {
+    mNextIndex = static_cast<ULONG>(mConnections.size());
     return S_FALSE;
+  }
   mNextIndex += cSkip;
   return S_OK;
 }
@@ -528,14 +654,27 @@ STDMETHODIMP tLuaCOMEnumConnections::Reset()
 */
 STDMETHODIMP tLuaCOMEnumConnections::Clone(IEnumConnections** ppIEnum)
 {
+  if(!ppIEnum)
+    return E_POINTER;
+
   HRESULT hr;
   *ppIEnum = NULL;
 
-  tLuaCOMEnumConnections* penumc = new tLuaCOMEnumConnections(mpHost); // E_OUTOFMEMORY
+  tLuaCOMEnumConnections* penumc = NULL;
+  try
+  {
+    penumc = new tLuaCOMEnumConnections(mpHost);
+  }
+  catch (...)
+  {
+    return E_OUTOFMEMORY;
+  }
   hr = penumc->Init(mConnections, mCookies, mNextIndex);
   if (SUCCEEDED(hr))
     hr = penumc->QueryInterface(
         IID_IEnumConnections, reinterpret_cast<void **>(ppIEnum));
+  if (FAILED(hr))
+    delete penumc;
 
   return hr;
 }
@@ -553,6 +692,7 @@ STDMETHODIMP tLuaCOMEnumConnections::Clone(IEnumConnections** ppIEnum)
 */
 tLuaCOMConnPointContainer::tLuaCOMConnPointContainer(lua_State* pL, IUnknown* pOuter) :
   mpOuter(pOuter),
+  mDefaultPoint(NULL),
   L(pL)
 {
   CHECKPARAM(pL); CHECKPARAM(pOuter);
@@ -564,17 +704,29 @@ tLuaCOMConnPointContainer::tLuaCOMConnPointContainer(lua_State* pL, IUnknown* pO
   CHK_COM_CODE(ci2->GetGUID(GUIDKIND_DEFAULT_SOURCE_DISP_IID, &iid));
   tCOMPtr<ITypeInfo> coclassinfo;
   CHK_COM_CODE(ci2->GetClassInfo(&coclassinfo));
-  ITypeInfo *events_typeinfo = tCOMUtil::GetDefaultInterfaceTypeInfo(coclassinfo, true);
+  tCOMPtr<ITypeInfo> events_typeinfo;
+  events_typeinfo.Attach(tCOMUtil::GetDefaultInterfaceTypeInfo(coclassinfo, true));
   CHK_LCOM_ERR(events_typeinfo, "No default source typeinfo.");
-  mPoints.push_back(new tLuaCOMConnPoint(L, mpOuter));
-  CHK_COM_CODE(mPoints[0]->Init(iid, events_typeinfo));
-  mDefaultPoint = mPoints[0];
+  tLuaCOMConnPoint* point = new tLuaCOMConnPoint(L, mpOuter);
+  try
+  {
+    CHK_COM_CODE(point->Init(iid, events_typeinfo));
+    mPoints.push_back(point);
+  }
+  catch(...)
+  {
+    delete point;
+    throw;
+  }
+  mDefaultPoint = point;
 }
 
 
 
 tLuaCOMConnPointContainer::~tLuaCOMConnPointContainer()
 {
+  for(size_t i = 0; i < mPoints.size(); i++)
+    delete mPoints[i];
 }
 
 
@@ -603,13 +755,18 @@ STDMETHODIMP_(ULONG) tLuaCOMConnPointContainer::Release()
 STDMETHODIMP tLuaCOMConnPointContainer::FindConnectionPoint(
      REFIID riid, IConnectionPoint** ppConnPt)
 {
+  if(!ppConnPt)
+    return E_POINTER;
+
   *ppConnPt = NULL;
 
   HRESULT hr = E_NOINTERFACE;
   if (mDefaultPoint)
   {
     IID iid;
-    mDefaultPoint->GetConnectionInterface(&iid);
+    hr = mDefaultPoint->GetConnectionInterface(&iid);
+    if(FAILED(hr))
+      return hr;
 
     if(iid == riid)
     {
@@ -632,17 +789,38 @@ STDMETHODIMP tLuaCOMConnPointContainer::FindConnectionPoint(
 STDMETHODIMP tLuaCOMConnPointContainer::EnumConnectionPoints(
     IEnumConnectionPoints** ppIEnum)
 {
+  if(!ppIEnum)
+    return E_POINTER;
+
   HRESULT hr = S_OK;
   
   // create IEnumConnectionPoints
   *ppIEnum = NULL;
-  tLuaCOMEnumConnPoints* penumcp = new tLuaCOMEnumConnPoints(this); // E_OUTOFMEMORY
-  std::vector<tCOMPtr<IConnectionPoint> > points; // [ok? empty]
+  tLuaCOMEnumConnPoints* penumcp = NULL;
+  std::vector<tCOMPtr<IConnectionPoint> > points;
+  try
+  {
+    penumcp = new tLuaCOMEnumConnPoints(this);
+    points.reserve(mPoints.size());
+    for(size_t i = 0; i < mPoints.size(); ++i)
+      points.push_back(tCOMPtr<IConnectionPoint>(mPoints[i]));
+  }
+  catch (...)
+  {
+    delete penumcp;
+    return E_OUTOFMEMORY;
+  }
+
   hr = penumcp->Init(points, 0);
   if (FAILED(hr))
+  {
+    delete penumcp;
     return hr;
+  }
   hr = penumcp->QueryInterface(
         IID_IEnumConnectionPoints, reinterpret_cast<void **>(ppIEnum));
+  if (FAILED(hr))
+    delete penumcp;
 
   return hr;
 }
@@ -669,7 +847,9 @@ void tLuaCOMConnPoint::push()
   luaCompat_pushTypeByName(L, MODULENAME, LCOM_CONNPOINT_TYPENAME);
   lua_setmetatable(L, -2);
   lua_pushstring(L, CONNPOINT_NAME);
-  lua_pushlightuserdata(L, this);
+  luaCompat_pushTypeByName(L, MODULENAME, LCOM_IUNKNOWN_TYPENAME);
+  AddRef();
+  luaCompat_newTypedObject(L, this);
   lua_settable(L, -3);
   LUASTACK_CLEAN(L, 1);
 }
@@ -704,12 +884,15 @@ int tLuaCOMConnPoint::l_call_sinks(lua_State *L)
   int num_params = (std::max)(0, user_last_param - user_first_param + 1);
 
   // gets connection point
-  tLuaCOMConnPoint* cp = 
-    reinterpret_cast<tLuaCOMConnPoint*>(luaCompat_getPointer(L, connpoint));
+  tLuaCOMConnPoint* cp =
+    *reinterpret_cast<tLuaCOMConnPoint**>(lua_touserdata(L, connpoint));
 
   // call each sink
   for(size_t i = 0; i < cp->mConnections.size(); i++)
   {
+    if(cp->mCookies[i] == 0 || cp->mSinks[i] == NULL)
+      continue;
+
     // pushes function mSinks[i][event] and lock
     LuaBeans::push(L, cp->mSinks[i]);
     cp->mSinks[i]->Lock();
