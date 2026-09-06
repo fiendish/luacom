@@ -22,6 +22,78 @@
 #define DYNAMIC_CAST static_cast
 #endif
 
+namespace
+{
+class tFuncDescHolder
+{
+public:
+  tFuncDescHolder(ITypeInfo * typeinfo, FUNCDESC * value)
+    : m_typeinfo(typeinfo), m_value(value) {}
+  ~tFuncDescHolder()
+    { if(m_value) m_typeinfo->ReleaseFuncDesc(m_value); }
+private:
+  ITypeInfo * m_typeinfo;
+  FUNCDESC * m_value;
+};
+
+class tVarDescHolder
+{
+public:
+  tVarDescHolder(ITypeInfo * typeinfo, VARDESC * value)
+    : m_typeinfo(typeinfo), m_value(value) {}
+  ~tVarDescHolder()
+    { if(m_value) m_typeinfo->ReleaseVarDesc(m_value); }
+private:
+  ITypeInfo * m_typeinfo;
+  VARDESC * m_value;
+};
+
+class tTypeAttrHolder
+{
+public:
+  tTypeAttrHolder(ITypeInfo * typeinfo, TYPEATTR * value)
+    : m_typeinfo(typeinfo), m_value(value) {}
+  ~tTypeAttrHolder()
+    { if(m_value) m_typeinfo->ReleaseTypeAttr(m_value); }
+private:
+  ITypeInfo * m_typeinfo;
+  TYPEATTR * m_value;
+};
+
+class tBstrHolder
+{
+public:
+  tBstrHolder() : m_value(NULL) {}
+  ~tBstrHolder() { SysFreeString(m_value); }
+  BSTR * out() { return &m_value; }
+  BSTR get() const { return m_value; }
+private:
+  BSTR m_value;
+};
+
+class tBstrArrayHolder
+{
+public:
+  explicit tBstrArrayHolder(UINT count)
+    : m_values(new BSTR[count]), m_count(count)
+  {
+    for(UINT i = 0; i < m_count; ++i)
+      m_values[i] = NULL;
+  }
+  ~tBstrArrayHolder()
+  {
+    for(UINT i = 0; i < m_count; ++i)
+      SysFreeString(m_values[i]);
+    delete[] m_values;
+  }
+  BSTR * data() { return m_values; }
+  BSTR operator[](UINT index) const { return m_values[index]; }
+private:
+  BSTR * m_values;
+  UINT m_count;
+};
+}
+
 const char tLuaTLB::type_name[] = "ITypeLib";
 const char tLuaTLB::pointer_type_name[] = "ITypeLib_pointer";
 
@@ -107,37 +179,35 @@ int tLuaTLB::GetDocumentation(tLuaObject* lua_obj, lua_State* L)
   
   CHECKPRECOND(lua_tlb);
 
-  HRESULT hr = S_OK;
-  
-  BSTR name;
-  BSTR helpstring;
-  ULONG helpcontext;
-  BSTR helpfile;
+  tBstrHolder name;
+  tBstrHolder helpstring;
+  ULONG helpcontext = 0;
+  tBstrHolder helpfile;
   CHK_COM_CODE(lua_tlb->typelib->GetDocumentation(-1, 
-    &name, &helpstring, &helpcontext, &helpfile));
+    name.out(), helpstring.out(), &helpcontext, helpfile.out()));
+
+  tStringBuffer name_text(tUtil::bstr2string(name.get()));
+  tStringBuffer help_text(tUtil::bstr2string(helpstring.get()));
+  tStringBuffer help_file_text(tUtil::bstr2string(helpfile.get()));
 
   lua_newtable(L);
 
   lua_pushstring(L, "name");
-  lua_pushstring(L, tUtil::bstr2string(name));
+  lua_pushstring(L, name_text);
   lua_settable(L, -3);
 
   lua_pushstring(L, "helpstring");
-  lua_pushstring(L, tUtil::bstr2string(helpstring));
+  lua_pushstring(L, help_text);
   lua_settable(L, -3);
 
   lua_pushstring(L, "helpfile");
-  lua_pushstring(L, tUtil::bstr2string(helpfile));
+  lua_pushstring(L, help_file_text);
   lua_settable(L, -3);
 
   lua_pushstring(L, "helpcontext");
   lua_pushnumber(L, helpcontext);
   lua_settable(L, -3);
  
-  SysFreeString(name);
-  SysFreeString(helpstring);
-  SysFreeString(helpfile);
-
   return 1;
 }
 
@@ -146,14 +216,12 @@ int tLuaTLB::ShowHelp(tLuaObject* lua_obj, lua_State* L)
   tLuaTLB* lua_tlb = DYNAMIC_CAST<tLuaTLB*>(lua_obj);
   CHECKPRECOND(lua_tlb);
 
-  ULONG helpcontext;
-  BSTR helpfile;
+  ULONG helpcontext = 0;
+  tBstrHolder helpfile;
   CHK_COM_CODE(lua_tlb->typelib->GetDocumentation(
-    -1, NULL, NULL, &helpcontext, &helpfile));
+    -1, NULL, NULL, &helpcontext, helpfile.out()));
   
-  tUtil::ShowHelp(tUtil::bstr2string(helpfile), helpcontext);
-
-  SysFreeString(helpfile);
+  tUtil::ShowHelp(tUtil::bstr2string(helpfile.get()), helpcontext);
 
   return 0;
 }
@@ -170,43 +238,45 @@ int tLuaTLB::ExportConstants(tLuaObject* lua_obj, lua_State* L)
   long count = lua_tlb->typelib->GetTypeInfoCount();
   while(count--)
   {
-    TYPEKIND tkind;
-    lua_tlb->typelib->GetTypeInfoType(count, &tkind);
+    TYPEKIND tkind = TKIND_MAX;
+    CHK_COM_CODE(lua_tlb->typelib->GetTypeInfoType(count, &tkind));
 
     if(tkind == TKIND_ENUM)
     {
       tCOMPtr<ITypeInfo> ptypeinfo;
       CHK_COM_CODE(lua_tlb->typelib->GetTypeInfo(count, &ptypeinfo));
 
-      tLuaCOMTypeHandler* typehandler = new tLuaCOMTypeHandler(ptypeinfo);
+      tLuaCOMTypeHandler typehandler(ptypeinfo);
 
       // get var_count
       TYPEATTR* ptypeattr = NULL;
-      CHK_COM_CODE(ptypeinfo->GetTypeAttr(&ptypeattr));
+      hr = ptypeinfo->GetTypeAttr(&ptypeattr);
+      tTypeAttrHolder typeattr_holder(ptypeinfo, ptypeattr);
+      CHK_COM_CODE(hr);
+      CHK_LCOM_ERR(ptypeattr, "Type attributes are unavailable.");
       long var_count = ptypeattr->cVars;
-      ptypeinfo->ReleaseTypeAttr(ptypeattr);
-      ptypeattr = NULL;
 
       while(var_count--)
       {
         VARDESC* pvardesc = NULL;
-        CHK_COM_CODE(ptypeinfo->GetVarDesc(var_count, &pvardesc));
+        hr = ptypeinfo->GetVarDesc(var_count, &pvardesc);
+        tVarDescHolder vardesc_holder(ptypeinfo, pvardesc);
+        CHK_COM_CODE(hr);
+        CHK_LCOM_ERR(pvardesc, "Variable description is unavailable.");
 
-        BSTR name;
-        ptypeinfo->GetDocumentation(pvardesc->memid, &name, NULL, NULL, NULL);
+        tBstrHolder name;
+        CHK_COM_CODE(ptypeinfo->GetDocumentation(
+          pvardesc->memid, name.out(), NULL, NULL, NULL));
+        CHK_LCOM_ERR(name.get(), "Variable name is unavailable.");
 
-        lua_pushstring(L, tUtil::bstr2string(name));
-        SysFreeString(name);
+        lua_pushstring(L, tUtil::bstr2string(name.get()));
 
-        typehandler->com2lua(L, *pvardesc->lpvarValue);
+        typehandler.com2lua(L, *pvardesc->lpvarValue);
 
         // sets in the table
         lua_settable(L, -3);
 
-        ptypeinfo->ReleaseVarDesc(pvardesc);
       }
-
-      SAFEDELETE(typehandler);
     }
   }
 
@@ -226,52 +296,55 @@ int tLuaTLB::ExportEnumerations(tLuaObject* lua_obj, lua_State* L)
   long count = lua_tlb->typelib->GetTypeInfoCount();
   while(count--)
   {
-    TYPEKIND tkind;
-    lua_tlb->typelib->GetTypeInfoType(count, &tkind);
+    TYPEKIND tkind = TKIND_MAX;
+    CHK_COM_CODE(lua_tlb->typelib->GetTypeInfoType(count, &tkind));
 
     if(tkind == TKIND_ENUM)
     {
       tCOMPtr<ITypeInfo> ptypeinfo;
       CHK_COM_CODE(lua_tlb->typelib->GetTypeInfo(count, &ptypeinfo));
 
-      BSTR name;
-      CHK_COM_CODE(lua_tlb->typelib->GetDocumentation(count, &name, NULL, NULL, NULL));
-      lua_pushstring(L, tUtil::bstr2string(name));
-      SysFreeString(name);
+      tBstrHolder enum_name;
+      CHK_COM_CODE(lua_tlb->typelib->GetDocumentation(
+        count, enum_name.out(), NULL, NULL, NULL));
+      CHK_LCOM_ERR(enum_name.get(), "Enumeration name is unavailable.");
+      lua_pushstring(L, tUtil::bstr2string(enum_name.get()));
       lua_newtable(L);
 
-      tLuaCOMTypeHandler* typehandler = new tLuaCOMTypeHandler(ptypeinfo);
+      tLuaCOMTypeHandler typehandler(ptypeinfo);
 
       TYPEATTR* ptypeattr = NULL;
-      CHK_COM_CODE(ptypeinfo->GetTypeAttr(&ptypeattr));
+      HRESULT hr = ptypeinfo->GetTypeAttr(&ptypeattr);
+      tTypeAttrHolder typeattr_holder(ptypeinfo, ptypeattr);
+      CHK_COM_CODE(hr);
+      CHK_LCOM_ERR(ptypeattr, "Type attributes are unavailable.");
 
       long var_count = ptypeattr->cVars;
-      
-      ptypeinfo->ReleaseTypeAttr(ptypeattr);
-      ptypeattr = NULL;
 
       while(var_count--)
       {
         VARDESC* pvardesc = NULL;
-        CHK_COM_CODE(ptypeinfo->GetVarDesc(var_count, &pvardesc));
+        HRESULT hr = ptypeinfo->GetVarDesc(var_count, &pvardesc);
+        tVarDescHolder vardesc_holder(ptypeinfo, pvardesc);
+        CHK_COM_CODE(hr);
+        CHK_LCOM_ERR(pvardesc, "Variable description is unavailable.");
 
-        ptypeinfo->GetDocumentation(pvardesc->memid, &name, NULL, NULL, NULL);
+        tBstrHolder name;
+        CHK_COM_CODE(ptypeinfo->GetDocumentation(
+          pvardesc->memid, name.out(), NULL, NULL, NULL));
+        CHK_LCOM_ERR(name.get(), "Variable name is unavailable.");
 
-        lua_pushstring(L, tUtil::bstr2string(name));
-        SysFreeString(name);
+        lua_pushstring(L, tUtil::bstr2string(name.get()));
 
-        typehandler->com2lua(L, *pvardesc->lpvarValue);
+        typehandler.com2lua(L, *pvardesc->lpvarValue);
 
         // sets in the table
         lua_settable(L, -3);
 
-        ptypeinfo->ReleaseVarDesc(pvardesc);
-        pvardesc = NULL;
       }
 
       lua_settable(L, -3);
 
-      SAFEDELETE(typehandler);
     }
   }
 
@@ -348,12 +421,12 @@ int tLuaTypeInfo::GetFuncDesc(tLuaObject* lua_obj, lua_State* L)
   unsigned short flags = 0 ;
   {
     TYPEATTR* ptypeattr = NULL;
-
-    CHK_COM_CODE(lua_typeinfo->typeinfo->GetTypeAttr(&ptypeattr));
+    hr = lua_typeinfo->typeinfo->GetTypeAttr(&ptypeattr);
+    tTypeAttrHolder typeattr_holder(lua_typeinfo->typeinfo, ptypeattr);
+    CHK_COM_CODE(hr);
+    CHK_LCOM_ERR(ptypeattr, "Type attributes are unavailable.");
 
     flags = ptypeattr->wTypeFlags;
-
-    lua_typeinfo->typeinfo->ReleaseTypeAttr(ptypeattr);
 
     if(!(flags & TYPEFLAG_FDISPATCHABLE))
       return 0;
@@ -365,14 +438,14 @@ int tLuaTypeInfo::GetFuncDesc(tLuaObject* lua_obj, lua_State* L)
   {
     UINT i = (UINT)lua_tointeger(L, 2);
 
-    CHK_COM_CODE(lua_typeinfo->typeinfo->GetFuncDesc(i, &pfuncdesc));
+    hr = lua_typeinfo->typeinfo->GetFuncDesc(i, &pfuncdesc);
   }
+  tFuncDescHolder funcdesc_holder(lua_typeinfo->typeinfo, pfuncdesc);
+  CHK_COM_CODE(hr);
+  CHK_LCOM_ERR(pfuncdesc, "Function description is unavailable.");
 
   if(pfuncdesc->wFuncFlags & FUNCFLAG_FRESTRICTED)
-  {
-    lua_typeinfo->typeinfo->ReleaseFuncDesc(pfuncdesc);
     return 0;
-  }
 
   // creates table to hold the funcdesc
   lua_newtable(L);
@@ -395,42 +468,41 @@ int tLuaTypeInfo::GetFuncDesc(tLuaObject* lua_obj, lua_State* L)
   lua_settable(L, -3);
 
   // gets all the names
-  BSTR* names = new BSTR[pfuncdesc->cParams+1];
+  tBstrArrayHolder names(pfuncdesc->cParams+1);
   UINT found = 0;
 
   // gets the name of the functions and the names of the
   // parameters
-  lua_typeinfo->typeinfo->GetNames(
-    pfuncdesc->memid, names, pfuncdesc->cParams+1, &found);
+  CHK_COM_CODE(lua_typeinfo->typeinfo->GetNames(
+    pfuncdesc->memid, names.data(), pfuncdesc->cParams+1, &found));
+  CHK_LCOM_ERR(found > 0 && names[0] != NULL,
+               "Function name is unavailable.");
 
   lua_pushstring(L, "name");
   lua_pushstring(L, tUtil::bstr2string(names[0]));
   lua_settable(L, -3);
 
-  SysFreeString(names[0]);
-
   // gets other documentation
   {
-    BSTR description, helpfile;
-    ULONG helpcontext;
+    tBstrHolder description;
+    tBstrHolder helpfile;
+    ULONG helpcontext = 0;
 
-    lua_typeinfo->typeinfo->GetDocumentation(
-      pfuncdesc->memid, NULL, &description, &helpcontext, &helpfile);
+    CHK_COM_CODE(lua_typeinfo->typeinfo->GetDocumentation(
+      pfuncdesc->memid, NULL, description.out(), &helpcontext, helpfile.out()));
 
     lua_pushstring(L, "description");
-    lua_pushstring(L, tUtil::bstr2string(description));
+    lua_pushstring(L, tUtil::bstr2string(description.get()));
     lua_settable(L, -3);
 
     lua_pushstring(L, "helpfile");
-    lua_pushstring(L, tUtil::bstr2string(helpfile));
+    lua_pushstring(L, tUtil::bstr2string(helpfile.get()));
     lua_settable(L, -3);
 
     lua_pushstring(L, "helpcontext");
     lua_pushnumber(L, helpcontext);
     lua_settable(L, -3);
 
-    SysFreeString(description);
-    SysFreeString(helpfile);
   }
 
   // now stores information for each parameter (if
@@ -456,7 +528,6 @@ int tLuaTypeInfo::GetFuncDesc(tLuaObject* lua_obj, lua_State* L)
     if((i+1) < (SHORT)found)
     {
       lua_pushstring(L, tUtil::bstr2string(names[i+1]));
-      SysFreeString(names[i+1]);
     }
     else
     {
@@ -518,8 +589,6 @@ int tLuaTypeInfo::GetFuncDesc(tLuaObject* lua_obj, lua_State* L)
   // removes copy of the table
   lua_pop(L, 1);
 
-  SAFEDELETEARR(names);
-
   // Stores the type for the return value
   TYPEDESC tdesc = pfuncdesc->elemdescFunc.tdesc;
   bool incompatible_type = false;
@@ -541,8 +610,6 @@ int tLuaTypeInfo::GetFuncDesc(tLuaObject* lua_obj, lua_State* L)
     lua_settable(L, -3);
   }
 
-  lua_typeinfo->typeinfo->ReleaseFuncDesc(pfuncdesc);
-  
   LUASTACK_CLEAN(L, 1);
 
   return 1;
@@ -564,8 +631,11 @@ int tLuaTypeInfo::GetVarDesc(tLuaObject* lua_obj, lua_State* L)
   {
     UINT i = (UINT)lua_tointeger(L, 2);
 
-    CHK_COM_CODE(lua_typeinfo->typeinfo->GetVarDesc(i, &pvardesc));
+    hr = lua_typeinfo->typeinfo->GetVarDesc(i, &pvardesc);
   }
+  tVarDescHolder vardesc_holder(lua_typeinfo->typeinfo, pvardesc);
+  CHK_COM_CODE(hr);
+  CHK_LCOM_ERR(pvardesc, "Variable description is unavailable.");
 
   // table to hold the vardesc
   lua_newtable(L);
@@ -573,12 +643,12 @@ int tLuaTypeInfo::GetVarDesc(tLuaObject* lua_obj, lua_State* L)
   // stores variable name
   lua_pushstring(L, "name");
   {
-    BSTR name;
-    lua_typeinfo->typeinfo->GetDocumentation(
-      pvardesc->memid, &name, NULL, NULL, NULL);
+    tBstrHolder name;
+    CHK_COM_CODE(lua_typeinfo->typeinfo->GetDocumentation(
+      pvardesc->memid, name.out(), NULL, NULL, NULL));
+    CHK_LCOM_ERR(name.get(), "Variable name is unavailable.");
 
-    lua_pushstring(L, tUtil::bstr2string(name));
-    SysFreeString(name);
+    lua_pushstring(L, tUtil::bstr2string(name.get()));
   }
   lua_settable(L, -3);
 
@@ -593,9 +663,6 @@ int tLuaTypeInfo::GetVarDesc(tLuaObject* lua_obj, lua_State* L)
     lua_settable(L, -3);
   }
     
-  lua_typeinfo->typeinfo->ReleaseVarDesc(pvardesc);
-  pvardesc = NULL;
-
   LUASTACK_CLEAN(L, 1);
 
   return 1;
@@ -665,37 +732,35 @@ int tLuaTypeInfo::GetDocumentation(tLuaObject* lua_obj, lua_State* L)
   tLuaTypeInfo* lua_typeinfo = DYNAMIC_CAST<tLuaTypeInfo*>(lua_obj);
   CHECKPRECOND(lua_typeinfo);
 
-  HRESULT hr = S_OK;
-  
-  BSTR name;
-  BSTR helpstring;
-  ULONG helpcontext;
-  BSTR helpfile;
+  tBstrHolder name;
+  tBstrHolder helpstring;
+  ULONG helpcontext = 0;
+  tBstrHolder helpfile;
   CHK_COM_CODE(lua_typeinfo->typeinfo->GetDocumentation(MEMBERID_NIL, 
-    &name, &helpstring, &helpcontext, &helpfile));
+    name.out(), helpstring.out(), &helpcontext, helpfile.out()));
+
+  tStringBuffer name_text(tUtil::bstr2string(name.get()));
+  tStringBuffer help_text(tUtil::bstr2string(helpstring.get()));
+  tStringBuffer help_file_text(tUtil::bstr2string(helpfile.get()));
 
   lua_newtable(L);
 
   lua_pushstring(L, "name");
-  lua_pushstring(L, tUtil::bstr2string(name));
+  lua_pushstring(L, name_text);
   lua_settable(L, -3);
 
   lua_pushstring(L, "helpstring");
-  lua_pushstring(L, tUtil::bstr2string(helpstring));
+  lua_pushstring(L, help_text);
   lua_settable(L, -3);
 
   lua_pushstring(L, "helpfile");
-  lua_pushstring(L, tUtil::bstr2string(helpfile));
+  lua_pushstring(L, help_file_text);
   lua_settable(L, -3);
 
   lua_pushstring(L, "helpcontext");
   lua_pushnumber(L, helpcontext);
   lua_settable(L, -3);
  
-  SysFreeString(name);
-  SysFreeString(helpstring);
-  SysFreeString(helpfile);
-
   return 1;
 }
 
@@ -705,8 +770,10 @@ int tLuaTypeInfo::GetTypeAttr(tLuaObject* lua_obj, lua_State* L)
   CHECKPRECOND(lua_typeinfo);
 
   TYPEATTR* ptypeattr = NULL;
-
-  CHK_COM_CODE(lua_typeinfo->typeinfo->GetTypeAttr(&ptypeattr));
+  HRESULT hr = lua_typeinfo->typeinfo->GetTypeAttr(&ptypeattr);
+  tTypeAttrHolder typeattr_holder(lua_typeinfo->typeinfo, ptypeattr);
+  CHK_COM_CODE(hr);
+  CHK_LCOM_ERR(ptypeattr, "Type attributes are unavailable.");
 
   // creates table to hold type attributes
   lua_newtable(L);
@@ -721,7 +788,7 @@ int tLuaTypeInfo::GetTypeAttr(tLuaObject* lua_obj, lua_State* L)
       lua_pushstring(L, "GUID");
       lua_pushstring(L, pGuid);
       lua_settable(L, -3);
-      delete pGuid;
+      delete[] pGuid;
     }
   }
 
