@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check the MUSHclient source inventory
+        run: python3 integration/check_mushclient_export.py
       - name: Test connection lifetime with sanitizers
         run: python3 src/test/connection_lifetime/run.py
   build-and-test:
