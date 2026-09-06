@@ -6,6 +6,8 @@
 #include <ocidl.h>
 #include <shlwapi.h>
 #include <wchar.h>
+#include <new>
+#include <string>
 
 #include "tCOMUtil.h"
 #include "tLuaCOMException.h"
@@ -117,6 +119,11 @@ ITypeInfo *tCOMUtil::GetCoClassTypeInfo(ITypeLib *typelib,
   for(i = 0; i < number; i++)
   {
     hr = typeinfos[i]->GetTypeAttr(&typeattr);
+    if(FAILED(hr) || typeattr == NULL)
+    {
+      typeinfos[i]->Release();
+      continue;
+    }
     
     TYPEKIND typekind = typeattr->typekind;
     typeinfos[i]->ReleaseTypeAttr(typeattr);
@@ -145,7 +152,10 @@ ITypeInfo *tCOMUtil::GetDefaultInterfaceTypeInfo(ITypeInfo* pCoClassinfo,
   TYPEATTR* pTA = NULL;
   HRESULT hr = S_OK;
 
-  if (SUCCEEDED(pCoClassinfo->GetTypeAttr(&pTA)))
+  if(pCoClassinfo == NULL)
+    return NULL;
+
+  if (SUCCEEDED(pCoClassinfo->GetTypeAttr(&pTA)) && pTA != NULL)
   {
     UINT i = 0;
     int iFlags = 0;
@@ -170,8 +180,16 @@ ITypeInfo *tCOMUtil::GetDefaultInterfaceTypeInfo(ITypeInfo* pCoClassinfo,
            * the type description from which we can then get
            * the ITypeInfo.
            */
-          pCoClassinfo->GetRefTypeOfImplType(i, &hRefType);
+          hr = pCoClassinfo->GetRefTypeOfImplType(i, &hRefType);
+          if(FAILED(hr))
+            continue;
+
           hr = pCoClassinfo->GetRefTypeInfo(hRefType, &typeinfo);
+          if(FAILED(hr) || typeinfo == NULL)
+          {
+            COM_RELEASE(typeinfo);
+            continue;
+          }
 
           // gets typeattr info
           TYPEATTR *ptypeattr = NULL;
@@ -180,7 +198,7 @@ ITypeInfo *tCOMUtil::GetDefaultInterfaceTypeInfo(ITypeInfo* pCoClassinfo,
 
           hr = typeinfo->GetTypeAttr(&ptypeattr);
 
-          if(FAILED(hr))
+          if(FAILED(hr) || ptypeattr == NULL)
           {
             COM_RELEASE(typeinfo);
             break;
@@ -221,11 +239,16 @@ ITypeInfo *tCOMUtil::GetDispatchTypeInfo(IDispatch* pdisp)
 {
   ITypeInfo* typeinfo = NULL;
   HRESULT hr = pdisp->GetTypeInfo(0, LOCALE_SYSTEM_DEFAULT, &typeinfo);
-  if(FAILED(hr))
+  if(FAILED(hr) || typeinfo == NULL)
     return NULL;
 
   TYPEATTR *ptypeattr = NULL;
-  typeinfo->GetTypeAttr(&ptypeattr);
+  hr = typeinfo->GetTypeAttr(&ptypeattr);
+  if(FAILED(hr) || ptypeattr == NULL)
+  {
+    COM_RELEASE(typeinfo);
+    return NULL;
+  }
 
   TYPEKIND typekind = ptypeattr->typekind;
 
@@ -248,7 +271,7 @@ ITypeInfo *tCOMUtil::GetDispatchTypeInfo(IDispatch* pdisp)
 
   // if there's no containing type lib, we have to
   // trust this one is the right type info
-  if(FAILED(hr))
+  if(FAILED(hr) || !ptypelib)
     return typeinfo;
 
   // obtem a typeinfo do iid fornecido
@@ -258,12 +281,17 @@ ITypeInfo *tCOMUtil::GetDispatchTypeInfo(IDispatch* pdisp)
 
   ITypeInfo* typeinfo_guid = NULL;
   hr = ptypelib->GetTypeInfoOfGuid(iid, &typeinfo_guid);
-  if(FAILED(hr))
+  if(FAILED(hr) || typeinfo_guid == NULL)
     return typeinfo;
 
   // verifica se e' dispinterface
   TYPEATTR *ptypeattr_iface = NULL;
   hr = typeinfo_guid->GetTypeAttr(&ptypeattr_iface);
+  if(FAILED(hr) || ptypeattr_iface == NULL)
+  {
+    COM_RELEASE(typeinfo_guid);
+    return typeinfo;
+  }
   TYPEKIND typekind_iface = ptypeattr_iface->typekind;
   typeinfo_guid->ReleaseTypeAttr(ptypeattr_iface);
 
@@ -316,6 +344,11 @@ ITypeInfo *tCOMUtil::GetInterfaceTypeInfo(ITypeLib* typelib,
   for(i = 0; i < number; i++)
   {
     hr = typeinfos[i]->GetTypeAttr(&typeattr);
+    if(FAILED(hr) || typeattr == NULL)
+    {
+      typeinfos[i]->Release();
+      continue;
+    }
     
     TYPEKIND typekind = typeattr->typekind;
     typeinfos[i]->ReleaseTypeAttr(typeattr);
@@ -397,18 +430,30 @@ ITypeLib* tCOMUtil::LoadTypeLibFromCLSID(CLSID clsid,
 
   /* converte CLSID para string normal */
   char* pcClsid = (char*) malloc( (wcslen(wcClsid) + 1) * sizeof(char));
+  if(pcClsid == NULL)
+  {
+    CoTaskMemFree(wcClsid);
+    return NULL;
+  }
   wcstombs(pcClsid, wcClsid,wcslen(wcClsid)+1);
 
   CoTaskMemFree(wcClsid);
 
-  DWORD size = 38*3; /*{F37C8063-4AD5-101B-B826-00DD01103DE1}*/
-  BYTE *bLibID = (BYTE *) malloc(size);
-  BYTE bVersion[100]; // This must hold something like "5.2"
-  HKEY iid_key, obj_key, typelib_key, version_key;
+  const DWORD libid_capacity = 38*3; /*{F37C8063-4AD5-101B-B826-00DD01103DE1}*/
+  BYTE *bLibID = (BYTE *) calloc(libid_capacity + 1, 1);
+  const DWORD version_capacity = 100;
+  BYTE bVersion[version_capacity + 1] = { 0 }; // This must hold something like "5.2"
+  HKEY iid_key = NULL, obj_key = NULL, typelib_key = NULL, version_key = NULL;
 
   /* extrai do registry type library (GUID e versao) */
   LONG res = 0;
   bool version_info_found = true;
+
+  if(bLibID == NULL)
+  {
+    free(pcClsid);
+    return NULL;
+  }
 
   try
   {
@@ -417,6 +462,7 @@ ITypeLib* tCOMUtil::LoadTypeLibFromCLSID(CLSID clsid,
 
     res = RegOpenKeyExA(iid_key, pcClsid, 0, KEY_READ, &obj_key);
     RegCloseKey(iid_key);
+    iid_key = NULL;
     free(pcClsid);
     pcClsid = NULL;
 
@@ -426,19 +472,40 @@ ITypeLib* tCOMUtil::LoadTypeLibFromCLSID(CLSID clsid,
     if(res != ERROR_SUCCESS)
     {
       RegCloseKey(obj_key);
+      obj_key = NULL;
       LUACOM_EXCEPTION(WINDOWS_ERROR);
     }
 
     res = RegOpenKeyExA(obj_key, "version",0, KEY_READ, &version_key);
     RegCloseKey(obj_key);
+    obj_key = NULL;
     if(res != ERROR_SUCCESS)
       version_info_found = false;
 
-    RegQueryValueExA(typelib_key, NULL, NULL, NULL, bLibID, &size);
+    DWORD libid_type = 0;
+    DWORD libid_size = libid_capacity;
+    res = RegQueryValueExA(typelib_key, NULL, NULL, &libid_type,
+                           bLibID, &libid_size);
     RegCloseKey(typelib_key);
-        
-    RegQueryValueExA(version_key, NULL, NULL, NULL, bVersion, &size);
-    RegCloseKey(version_key);
+    typelib_key = NULL;
+    WINCHECK(res == ERROR_SUCCESS && libid_type == REG_SZ &&
+             libid_size > 1 && libid_size <= libid_capacity);
+    bLibID[libid_size] = '\0';
+
+    if(version_info_found)
+    {
+      DWORD version_type = 0;
+      DWORD version_size = version_capacity;
+      res = RegQueryValueExA(version_key, NULL, NULL, &version_type,
+                             bVersion, &version_size);
+      RegCloseKey(version_key);
+      version_key = NULL;
+      if(res != ERROR_SUCCESS || version_type != REG_SZ ||
+         version_size <= 1 || version_size > version_capacity)
+        version_info_found = false;
+      else
+        bVersion[version_size] = '\0';
+    }
   }
   catch(class tLuaCOMException& e)
   {
@@ -447,6 +514,15 @@ ITypeLib* tCOMUtil::LoadTypeLibFromCLSID(CLSID clsid,
     if(pcClsid)
       free(pcClsid);
 
+    if(iid_key)
+      RegCloseKey(iid_key);
+    if(obj_key)
+      RegCloseKey(obj_key);
+    if(typelib_key)
+      RegCloseKey(typelib_key);
+    if(version_key)
+      RegCloseKey(version_key);
+
     free(bLibID);
     return NULL;
   }
@@ -454,6 +530,11 @@ ITypeLib* tCOMUtil::LoadTypeLibFromCLSID(CLSID clsid,
   // converts libID to multibyte string
   wchar_t* wcTypelib= (wchar_t*) 
     malloc( (strlen((char *) bLibID) + 1) * sizeof(wchar_t));
+  if(wcTypelib == NULL)
+  {
+    free(bLibID);
+    return NULL;
+  }
   mbstowcs(wcTypelib, (char *) bLibID, strlen((char *) bLibID)+1);
 
   // extracts version information
@@ -468,13 +549,12 @@ ITypeLib* tCOMUtil::LoadTypeLibFromCLSID(CLSID clsid,
       (const char *) bVersion,
       "%d.%d",
       &version_major, &version_minor);
+
+    if(found != 2)
+      version_info_found = false;
   }
 
-  if(major_version > 0 &&
-      (
-        (!version_info_found) || (found == 0)
-      )
-    )
+  if(major_version > 0 && !version_info_found)
   {
     version_major = major_version;
     version_minor = 0;
@@ -498,14 +578,17 @@ ITypeLib* tCOMUtil::LoadTypeLibFromCLSID(CLSID clsid,
   free(bLibID);
 
   GUID libid = IID_NULL;
-  CLSIDFromString(wcTypelib, &libid);
+  hr = CLSIDFromString(wcTypelib, &libid);
   free(wcTypelib);
+
+  if(FAILED(hr))
+    return NULL;
 
   ITypeLib* typelib = NULL;
 
   hr = LoadRegTypeLib(libid, version_major, version_minor, 0, &typelib);
 
-  if(FAILED(hr))
+  if(FAILED(hr) || typelib == NULL)
     return NULL;
 
   return typelib;
@@ -563,7 +646,7 @@ CLSID tCOMUtil::GetCLSID(ITypeInfo *coclassinfo)
 
   HRESULT hr = coclassinfo->GetTypeAttr(&ptypeattr);
 
-  if(FAILED(hr))
+  if(FAILED(hr) || ptypeattr == NULL)
     return IID_NULL;
 
   CLSID clsid = ptypeattr->guid;
@@ -581,8 +664,6 @@ bool tCOMUtil::GetDefaultTypeLibVersion(const char* libid,
   HKEY typelib_key, this_typelib_key;
 
   res = RegOpenKeyExA(HKEY_CLASSES_ROOT,"TypeLib", 0, KEY_READ, &typelib_key);
-  RegCloseKey(HKEY_CLASSES_ROOT);
-
   if(res != ERROR_SUCCESS)
     return false;
 
@@ -593,7 +674,7 @@ bool tCOMUtil::GetDefaultTypeLibVersion(const char* libid,
     return false;
 
   const int bufsize = 1000;
-  char version_info[bufsize];
+  char version_info[bufsize + 1] = { 0 };
   DWORD size = bufsize;
 
   res = RegEnumKeyExA(this_typelib_key, 0, version_info, &size,
@@ -603,9 +684,8 @@ bool tCOMUtil::GetDefaultTypeLibVersion(const char* libid,
   if(res != ERROR_SUCCESS)
     return false;
 
-  sscanf(version_info, "%d.%d", version_major, version_minor);
-
-  return true;
+  version_info[size] = '\0';
+  return sscanf(version_info, "%d.%d", version_major, version_minor) == 2;
 }
 
 bool tCOMUtil::GetRegKeyValue(const char* key, char** pValue) {
@@ -617,8 +697,14 @@ bool tCOMUtil::GetRegKeyValue(const char* key, char** pValue) {
   if(ERROR_SUCCESS == ec) {
     *pValue = new char[cbValue+1];
     ec = RegQueryValueA(HKEY_CLASSES_ROOT,key,*pValue,&cbValue);
-      if(ERROR_SUCCESS == ec)
+    if(ERROR_SUCCESS == ec)
+    {
+      (*pValue)[cbValue] = '\0';
       return true;
+    }
+
+    delete[] *pValue;
+    *pValue = NULL;
   }
 
   return false;
@@ -633,19 +719,17 @@ bool tCOMUtil::SetRegKeyValue(const char *key,
   LONG ec = 0;
   HKEY hKey;
 
-  const int bufsize = 10000;
-  char Key[bufsize];
-  strncpy(Key, key, bufsize - 1);
+  std::string Key = key;
 
   if (NULL != subkey)
   {
-    strcat(Key, "\\");
-    strcat(Key, subkey);
+    Key += "\\";
+    Key += subkey;
   }
 
   ec = RegCreateKeyExA(
          HKEY_CLASSES_ROOT,
-         Key,
+         Key.c_str(),
          0,
          NULL,
          REG_OPTION_NON_VOLATILE,
@@ -678,18 +762,17 @@ bool tCOMUtil::SetRegKeyValue(const char *key,
 bool tCOMUtil::DelRegKey(const char *key,
                          const char *subkey)
 {
-  const int bufsize = 10000;
-  char Key[bufsize];
-  strncpy(Key, key, bufsize - 1);
+  std::string Key = key;
 
   if (NULL != subkey)
   {
-    strcat(Key, "\\");
-    strcat(Key, subkey);
+    Key += "\\";
+    Key += subkey;
   }
 
-  LONG ec = SHDeleteKeyA(HKEY_CLASSES_ROOT, Key);
-  if (ERROR_SUCCESS == ec)
+  LONG ec = SHDeleteKeyA(HKEY_CLASSES_ROOT, Key.c_str());
+  if (ERROR_SUCCESS == ec || ERROR_FILE_NOT_FOUND == ec ||
+      ERROR_PATH_NOT_FOUND == ec)
   {
     return true;
   }
@@ -732,14 +815,36 @@ void tCOMUtil::DumpTypeInfo(ITypeInfo *typeinfo)
   for(int i = 0; i < pta->cFuncs; i++)
   {
     FUNCDESC *pfd = NULL;
-    typeinfo->GetFuncDesc(i, &pfd);
+    hr = typeinfo->GetFuncDesc(i, &pfd);
+    if(FAILED(hr) || pfd == NULL)
+      continue;
 
-    BSTR names[1];
-    unsigned int dumb;
-    typeinfo->GetNames(pfd->memid, names, 1, &dumb);
+    BSTR names[1] = { NULL };
+    unsigned int dumb = 0;
+    hr = typeinfo->GetNames(pfd->memid, names, 1, &dumb);
+
+    if(FAILED(hr) || dumb == 0 || names[0] == NULL)
+    {
+      SysFreeString(names[0]);
+      typeinfo->ReleaseFuncDesc(pfd);
+      continue;
+    }
+
+    tStringBuffer function_name;
+    try
+    {
+      function_name = tUtil::bstr2string(names[0]);
+    }
+    catch (...)
+    {
+      SysFreeString(names[0]);
+      typeinfo->ReleaseFuncDesc(pfd);
+      typeinfo->ReleaseTypeAttr(pta);
+      throw;
+    }
 
     printf("%.3d: %-30s\tid=0x%lx\t%d param(s)\n", i,
-      tUtil::bstr2string(names[0]).getBuffer(), (unsigned long)pfd->memid, pfd->cParams);
+      function_name.getBuffer(), (unsigned long)pfd->memid, pfd->cParams);
 
     typeinfo->ReleaseFuncDesc(pfd);
     SysFreeString(names[0]);
@@ -895,33 +1000,75 @@ const char* tCOMUtil::getPrintableTypeKind(const TYPEKIND tkind)
 
 HRESULT tCOMUtil::GUID2String(GUID& Guid, char** ppGuid)
 {
+  if(!ppGuid)
+    return E_POINTER;
+
+  *ppGuid = NULL;
   wchar_t* wcGuid = NULL;
 
   HRESULT hr = StringFromCLSID(Guid, &wcGuid);
 
   if (FAILED(hr))
     return hr;
+  if(!wcGuid)
+    return E_UNEXPECTED;
 
-  *ppGuid = new char[wcslen(wcGuid) + 1];
-  wcstombs(*ppGuid, wcGuid, wcslen(wcGuid)+1);
+  int length = WideCharToMultiByte(CP_ACP, 0, wcGuid, -1,
+                                   NULL, 0, NULL, NULL);
+  if(length <= 0)
+  {
+    DWORD error = GetLastError();
+    CoTaskMemFree(wcGuid);
+    return HRESULT_FROM_WIN32(error ? error : ERROR_NO_UNICODE_TRANSLATION);
+  }
+
+  char * result = NULL;
+  try
+  {
+    result = new char[length];
+  }
+  catch(const std::bad_alloc&)
+  {
+    CoTaskMemFree(wcGuid);
+    return E_OUTOFMEMORY;
+  }
+
+  if(WideCharToMultiByte(CP_ACP, 0, wcGuid, -1, result,
+                         length, NULL, NULL) != length)
+  {
+    DWORD error = GetLastError();
+    delete[] result;
+    CoTaskMemFree(wcGuid);
+    return HRESULT_FROM_WIN32(error ? error : ERROR_NO_UNICODE_TRANSLATION);
+  }
 
   CoTaskMemFree(wcGuid);
+
+  *ppGuid = result;
 
   return S_OK;
 }
 
 CLSID tCOMUtil::FindCLSID(ITypeInfo* interface_typeinfo)
 {
+  if(interface_typeinfo == NULL)
+    return IID_NULL;
+
   // gets IID
   TYPEATTR* ptypeattr = NULL;
-  interface_typeinfo->GetTypeAttr(&ptypeattr);
+  HRESULT hr = interface_typeinfo->GetTypeAttr(&ptypeattr);
+  if(FAILED(hr) || ptypeattr == NULL)
+    return IID_NULL;
   IID iid = ptypeattr->guid;
   interface_typeinfo->ReleaseTypeAttr(ptypeattr);
   ptypeattr = NULL;
 
   // Gets type library
   tCOMPtr<ITypeLib> ptypelib;
-  interface_typeinfo->GetContainingTypeLib(&ptypelib, NULL);
+  UINT typelib_index = 0;
+  hr = interface_typeinfo->GetContainingTypeLib(&ptypelib, &typelib_index);
+  if(FAILED(hr) || !ptypelib)
+    return IID_NULL;
 
   // iterates looking for IID inside some coclass
   long count = ptypelib->GetTypeInfoCount();
@@ -930,18 +1077,24 @@ CLSID tCOMUtil::FindCLSID(ITypeInfo* interface_typeinfo)
   while(count-- && !found)
   {
     TYPEKIND tkind;
-    ptypelib->GetTypeInfoType(count, &tkind);
+    hr = ptypelib->GetTypeInfoType(count, &tkind);
+    if(FAILED(hr))
+      continue;
 
     if(tkind != TKIND_COCLASS)
       continue;
 
     // look inside
     tCOMPtr<ITypeInfo> ptypeinfo;
-    ptypelib->GetTypeInfo(count, &ptypeinfo);
+    hr = ptypelib->GetTypeInfo(count, &ptypeinfo);
+    if(FAILED(hr) || !ptypeinfo)
+      continue;
 
     // gets counts and clsid
     TYPEATTR* ptypeattr = NULL;
-    ptypeinfo->GetTypeAttr(&ptypeattr);
+    hr = ptypeinfo->GetTypeAttr(&ptypeattr);
+    if(FAILED(hr) || ptypeattr == NULL)
+      continue;
     long ifaces_count   = ptypeattr->cImplTypes;
     clsid = ptypeattr->guid;
     ptypeinfo->ReleaseTypeAttr(ptypeattr);
@@ -950,10 +1103,16 @@ CLSID tCOMUtil::FindCLSID(ITypeInfo* interface_typeinfo)
     while(ifaces_count-- && !found)
     {
       HREFTYPE RefType;
-      ptypeinfo->GetRefTypeOfImplType(ifaces_count, &RefType);
+      hr = ptypeinfo->GetRefTypeOfImplType(ifaces_count, &RefType);
+      if(FAILED(hr))
+        continue;
       tCOMPtr<ITypeInfo> piface_typeinfo;
-      ptypeinfo->GetRefTypeInfo(RefType, &piface_typeinfo);
-      piface_typeinfo->GetTypeAttr(&ptypeattr);
+      hr = ptypeinfo->GetRefTypeInfo(RefType, &piface_typeinfo);
+      if(FAILED(hr) || !piface_typeinfo)
+        continue;
+      hr = piface_typeinfo->GetTypeAttr(&ptypeattr);
+      if(FAILED(hr) || ptypeattr == NULL)
+        continue;
 
       if(IsEqualIID(ptypeattr->guid, iid))
       {
@@ -965,5 +1124,5 @@ CLSID tCOMUtil::FindCLSID(ITypeInfo* interface_typeinfo)
     }
   }
 
-  return clsid;
+  return found ? clsid : IID_NULL;
 }
