@@ -74,9 +74,6 @@ public:
 private:
   static int l_call_sinks(lua_State *L);
 
-  // COM reference count
-  ULONG mRefCount;
-
   // host object
   IUnknown* mpHost;
 
@@ -93,7 +90,7 @@ private:
   // holds LuaCOM objects for each sink
   std::vector<tLuaCOM*> mSinks;
 
-  ITypeInfo* mpTypeinfo;
+  tCOMPtr<ITypeInfo> mpTypeinfo;
   lua_State* L;
 };
 
@@ -165,7 +162,7 @@ private:
 
   tLuaCOMConnPoint* mDefaultPoint;
 
-  std::vector<tCOMPtr<tLuaCOMConnPoint> > mPoints;
+  std::vector<tLuaCOMConnPoint*> mPoints;
 
   lua_State* L;
 };

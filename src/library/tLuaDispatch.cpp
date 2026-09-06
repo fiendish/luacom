@@ -53,6 +53,9 @@ STDMETHODIMP_(ULONG) tLuaDispatch::ProvideClassInfo2::Release(void)
 
 STDMETHODIMP tLuaDispatch::ProvideClassInfo2::GetClassInfo(ITypeInfo** ppTypeInfo)
 {
+  if(!ppTypeInfo)
+    return E_POINTER;
+
   *ppTypeInfo = coclassinfo;
   coclassinfo->AddRef();
 
@@ -79,8 +82,10 @@ STDMETHODIMP tLuaDispatch::ProvideClassInfo2::GetGUID(DWORD dwGuidKind,
 
     hr = source_typeinfo->GetTypeAttr(&typeattr);
 
-    if(FAILED(hr))
+    if(FAILED(hr) || !typeattr)
     {
+      if(typeattr)
+        source_typeinfo->ReleaseTypeAttr(typeattr);
       source_typeinfo->Release();
       return E_UNEXPECTED;
     }
@@ -106,6 +111,9 @@ STDMETHODIMP tLuaDispatch::ProvideClassInfo2::GetGUID(DWORD dwGuidKind,
 STDMETHODIMP
 tLuaDispatch::QueryInterface(REFIID riid, void FAR* FAR* ppv)
 {
+    if(!ppv)
+      return E_POINTER;
+
     if(IsEqualIID(riid, IID_IUnknown)  ||
        IsEqualIID(riid, IID_IDispatch) ||
        IsEqualIID(riid, interface_iid)) {
@@ -164,10 +172,10 @@ tLuaDispatch::Release()
     while(num_methods--)
     {
       typeinfo->ReleaseFuncDesc(funcinfo[num_methods].funcdesc);
-      delete funcinfo[num_methods].name;
+      delete[] funcinfo[num_methods].name;
     }
 
-    delete funcinfo;
+    delete[] funcinfo;
     typeinfo->Release();
     typeinfo = NULL;
 
@@ -197,6 +205,9 @@ tLuaDispatch::Release()
 STDMETHODIMP
 tLuaDispatch::GetTypeInfoCount(unsigned int FAR* pctinfo)
 {
+    if(!pctinfo)
+      return E_POINTER;
+
     *pctinfo = 1;
     return NOERROR;
 }
@@ -388,6 +399,8 @@ STDMETHODIMP tLuaDispatch::PushIfSameState(lua_State *p_L) {
 tLuaDispatch::tLuaDispatch(lua_State* p_L, ITypeInfo * pTypeinfo, int ref)
 {
   HRESULT hr;
+  TYPEATTR * ptypeattr = NULL;
+  FUNCDESC * funcdesc = NULL;
 
   L = p_L;
 
@@ -402,16 +415,20 @@ tLuaDispatch::tLuaDispatch(lua_State* p_L, ITypeInfo * pTypeinfo, int ref)
 
   typeinfo->AddRef();
 
-  // initialize type converter
-  typehandler = new tLuaCOMTypeHandler(typeinfo);
+  typehandler = NULL;
+  funcinfo = NULL;
+  num_methods = 0;
+  cpc = NULL;
+  classinfo2 = NULL;
 
+  try
   {
-    TYPEATTR * ptypeattr = NULL;
-    FUNCDESC *funcdesc = NULL;
+    // initialize type converter
+    typehandler = new tLuaCOMTypeHandler(typeinfo);
 
     hr = typeinfo->GetTypeAttr(&ptypeattr);
 
-    CHECK(SUCCEEDED(hr), INTERNAL_ERROR);
+    CHECK(SUCCEEDED(hr) && ptypeattr != NULL, INTERNAL_ERROR);
 
     memcpy(&interface_iid, &ptypeattr->guid, sizeof(IID));
 
@@ -420,10 +437,9 @@ tLuaDispatch::tLuaDispatch(lua_State* p_L, ITypeInfo * pTypeinfo, int ref)
 
     unsigned int n = ptypeattr->cFuncs;
     typeinfo->ReleaseTypeAttr(ptypeattr);
+    ptypeattr = NULL;
 
     funcinfo = new tFuncInfo[n];
-
-    num_methods = 0;
 
     for (unsigned int i = 0; i < n;i++)
     {
@@ -433,27 +449,83 @@ tLuaDispatch::tLuaDispatch(lua_State* p_L, ITypeInfo * pTypeinfo, int ref)
 
       // ignores functions not accessible via Automation
       if(funcdesc->wFuncFlags & FUNCFLAG_FRESTRICTED)
+      {
+        typeinfo->ReleaseFuncDesc(funcdesc);
+        funcdesc = NULL;
         continue;
+      }
+
+      BSTR names[1] = { NULL };
+      unsigned int found = 0;
+      hr = typeinfo->GetNames(funcdesc->memid, names, 1, &found);
+      if(FAILED(hr) || found != 1 || names[0] == NULL)
+      {
+        if(names[0])
+          SysFreeString(names[0]);
+        typeinfo->ReleaseFuncDesc(funcdesc);
+        funcdesc = NULL;
+        LUACOM_EXCEPTION(INTERNAL_ERROR);
+      }
+
+      const int str_size = WideCharToMultiByte(CP_ACP, 0, names[0], -1,
+                                                NULL, 0, NULL, NULL);
+      if(str_size == 0)
+      {
+        SysFreeString(names[0]);
+        typeinfo->ReleaseFuncDesc(funcdesc);
+        funcdesc = NULL;
+        LUACOM_EXCEPTION(WINDOWS_ERROR);
+      }
+
+      char * method_name = NULL;
+      try
+      {
+        method_name = new char[str_size];
+      }
+      catch (...)
+      {
+        SysFreeString(names[0]);
+        typeinfo->ReleaseFuncDesc(funcdesc);
+        funcdesc = NULL;
+        throw;
+      }
+
+      if(WideCharToMultiByte(CP_ACP, 0, names[0], -1, method_name,
+                             str_size, NULL, NULL) != str_size)
+      {
+        delete[] method_name;
+        SysFreeString(names[0]);
+        typeinfo->ReleaseFuncDesc(funcdesc);
+        funcdesc = NULL;
+        LUACOM_EXCEPTION(WINDOWS_ERROR);
+      }
+      SysFreeString(names[0]);
 
       funcinfo[num_methods].funcdesc = funcdesc;
-
-      BSTR names[1];
-      unsigned int dumb; 
-      hr = typeinfo->GetNames(funcdesc->memid, names, 1, &dumb); 
-      CHECK(SUCCEEDED(hr), INTERNAL_ERROR);
-
-      const int str_size = SysStringLen(names[0]);
-
-      funcinfo[num_methods].name = new char[str_size + 1];
-      wcstombs(funcinfo[num_methods].name, names[0], str_size+1);
-      SysFreeString(names[0]);
+      funcinfo[num_methods].name = method_name;
+      funcdesc = NULL;
 
       num_methods++;
     }
   }
-
-  cpc = NULL;
-  classinfo2 = NULL;
+  catch (...)
+  {
+    if(funcdesc)
+      typeinfo->ReleaseFuncDesc(funcdesc);
+    if(ptypeattr)
+      typeinfo->ReleaseTypeAttr(ptypeattr);
+    while(num_methods--)
+    {
+      typeinfo->ReleaseFuncDesc(funcinfo[num_methods].funcdesc);
+      delete[] funcinfo[num_methods].name;
+    }
+    delete[] funcinfo;
+    delete typehandler;
+    typeinfo->Release();
+    typeinfo = NULL;
+    luaL_unref(L, LUA_REGISTRYINDEX, table_ref);
+    throw;
+  }
 
   ID = InterlockedIncrement(&(tLuaDispatch::NEXT_ID));
   tUtil::log_verbose("tLuaDispatch", "%.4d:created", ID);
@@ -493,10 +565,32 @@ void tLuaDispatch::FillExceptionInfo(EXCEPINFO *pexcepinfo, const char *text)
   if(!pexcepinfo)
     return;
 
+  BSTR source = NULL;
+  BSTR description = NULL;
+  try
+  {
+    source = tUtil::string2bstr("LuaCOM");
+    description = tUtil::string2bstr(text);
+  }
+  catch(class tLuaCOMException& e)
+  {
+    SysFreeString(source);
+    pexcepinfo->wCode = 1000;
+    pexcepinfo->wReserved = 0;
+    pexcepinfo->bstrSource = NULL;
+    pexcepinfo->bstrDescription = NULL;
+    pexcepinfo->bstrHelpFile = NULL;
+    pexcepinfo->pvReserved = NULL;
+    pexcepinfo->pfnDeferredFillIn = NULL;
+    pexcepinfo->scode =
+      e.code == tLuaCOMException::MALLOC_ERROR ? E_OUTOFMEMORY : E_FAIL;
+    return;
+  }
+
   pexcepinfo->wCode             = 1000;
   pexcepinfo->wReserved         = 0;
-  pexcepinfo->bstrSource        = tUtil::string2bstr("LuaCOM");
-  pexcepinfo->bstrDescription   = tUtil::string2bstr(text);
+  pexcepinfo->bstrSource        = source;
+  pexcepinfo->bstrDescription   = description;
   pexcepinfo->bstrHelpFile      = NULL;
   pexcepinfo->pvReserved        = NULL;
   pexcepinfo->pfnDeferredFillIn = NULL;
@@ -725,15 +819,35 @@ void tLuaDispatch::SetCoClassinfo(ITypeInfo *coclassinfo)
 
 void tLuaDispatch::BeConnectable(void)
 {
-  try
+  tCOMPtr<IProvideClassInfo2> class_info;
+  CHK_COM_CODE(QueryInterface(IID_IProvideClassInfo2, (void**)&class_info));
+  tCOMPtr<ITypeInfo> coclass_info;
+  CHK_COM_CODE(class_info->GetClassInfo(&coclass_info));
+  CHK_LCOM_ERR(coclass_info, "Coclass type information is unavailable.");
+
+  TYPEATTR* attributes = NULL;
+  CHK_COM_CODE(coclass_info->GetTypeAttr(&attributes));
+  CHK_LCOM_ERR(attributes, "Coclass attributes are unavailable.");
+  const UINT interface_count = attributes->cImplTypes;
+  coclass_info->ReleaseTypeAttr(attributes);
+
+  // A class without a selectable source interface has no connection point.
+  bool has_source = false;
+  for(UINT i = 0; i < interface_count; i++)
   {
-    cpc = new tLuaCOMConnPointContainer(L, (IDispatch*)this);
+    int flags = 0;
+    CHK_COM_CODE(coclass_info->GetImplTypeFlags(i, &flags));
+    if(((flags & IMPLTYPEFLAG_FDEFAULT) || interface_count == 1) &&
+       (flags & IMPLTYPEFLAG_FSOURCE))
+    {
+      has_source = true;
+      break;
+    }
   }
-  catch(class tLuaCOMException& e)
-  {
-    UNUSED(e);
-    cpc = NULL;
-  }
+  if(!has_source)
+    return;
+
+  cpc = new tLuaCOMConnPointContainer(L, (IDispatch*)this);
 }
 
 tLuaCOMConnPointContainer* tLuaDispatch::GetConnPointContainer()
