@@ -223,7 +223,7 @@ end
 preload_modules(modules)
 arg[0] = '${TESTFILEABS}'
 table.remove(arg, 1)
-return assert(loadfile '${TESTFILEABS}')(unpack(arg))
+return assert(loadfile '${TESTFILEABS}')((table.unpack or unpack)(arg))
 "    )
     if ( _ARG_WORKING_DIRECTORY )
       get_filename_component (
