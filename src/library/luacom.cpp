@@ -1023,6 +1023,47 @@ static void luacom_DelRegKey(const char * key)
   CHK_LCOM_ERR(tCOMUtil::DelRegKey(key, NULL), message.c_str());
 }
 
+// Several coclasses can share one type library registration.
+static HRESULT luacom_UnRegisterTypeLib(const TLIBATTR& attributes)
+{
+  const wchar_t* platform = NULL;
+  switch(attributes.syskind)
+  {
+    case SYS_WIN16: platform = L"win16"; break;
+    case SYS_WIN32: platform = L"win32"; break;
+    case SYS_WIN64: platform = L"win64"; break;
+    default: return E_INVALIDARG;
+  }
+
+  wchar_t guid[40];
+  if(!StringFromGUID2(attributes.guid, guid, sizeof(guid) / sizeof(guid[0])))
+    return E_INVALIDARG;
+
+  wchar_t key[100];
+  _snwprintf(key, sizeof(key) / sizeof(key[0]),
+             L"TypeLib\\%ls\\%x.%x\\%lx\\%ls", guid,
+             static_cast<unsigned>(attributes.wMajorVerNum),
+             static_cast<unsigned>(attributes.wMinorVerNum),
+             static_cast<unsigned long>(attributes.lcid), platform);
+
+  // Check the exact version, locale and platform, without COM lookup fallbacks.
+  HKEY registration = NULL;
+  LONG status = RegOpenKeyExW(HKEY_CLASSES_ROOT, key, 0, KEY_QUERY_VALUE,
+                              &registration);
+  if(status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)
+    return S_OK;
+  if(status != ERROR_SUCCESS)
+    return HRESULT_FROM_WIN32(status);
+
+  status = RegCloseKey(registration);
+  if(status != ERROR_SUCCESS)
+    return HRESULT_FROM_WIN32(status);
+
+  return UnRegisterTypeLib(attributes.guid, attributes.wMajorVerNum,
+                            attributes.wMinorVerNum, attributes.lcid,
+                            attributes.syskind);
+}
+
 static int luacom_RegisterObject(lua_State *L)
 {
   if(lua_type(L, 1) != LUA_TTABLE && lua_type(L,1) != LUA_TUSERDATA)
@@ -1322,9 +1363,7 @@ static int luacom_UnRegisterObject(lua_State *L)
       CHK_COM_CODE(typelib->GetLibAttr(&plibattr));
       CHK_LCOM_ERR(plibattr, "Type library attributes are unavailable.");
 
-      hr = UnRegisterTypeLib(plibattr->guid, plibattr->wMajorVerNum,
-                             plibattr->wMinorVerNum, plibattr->lcid,
-                             plibattr->syskind);
+      hr = luacom_UnRegisterTypeLib(*plibattr);
 
       typelib->ReleaseTLibAttr(plibattr);
       CHK_COM_CODE(hr);
