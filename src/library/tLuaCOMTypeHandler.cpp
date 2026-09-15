@@ -1304,7 +1304,7 @@ void tLuaCOMTypeHandler::fillDispParams(lua_State* L,
 
   try
   {
-    for (unsigned short i = 0; i < max_params; i++)
+    for (unsigned int i = 0; i < max_params; i++)
     {
       VariantValue defaultValue;
       VariantValue var;
@@ -1452,7 +1452,7 @@ void tLuaCOMTypeHandler::fillDispParams(lua_State* L,
   {
     VARIANTARG temp;
 
-    for(unsigned short i = 0; i < r_cArgs/2; i++)
+    for(unsigned int i = 0; i < r_cArgs/2; i++)
     {
       temp = r_rgvarg[i];
       r_rgvarg[i] = r_rgvarg[r_cArgs - i - 1];
