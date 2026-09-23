@@ -378,7 +378,7 @@ tLuaDispatch::Invoke(
 }
 
 STDMETHODIMP tLuaDispatch::PushIfSameState(lua_State *p_L) {
-  lua_rawgeti(L, LUA_REGISTRYINDEX, table_ref);
+  lua_rawgeti(p_L, LUA_REGISTRYINDEX, table_ref);
   if(lua_isnil(p_L, -1)) {
     lua_pop(p_L,1);
     return E_FAIL;
