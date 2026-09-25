@@ -13,6 +13,57 @@
 #include "tUtil.h"
 #include "LuaCompat.h"
 
+namespace
+{
+// Implementation-table metamethods run under Lua protection. Translate their
+// failures to C++ exceptions so Invoke restores its stack and COM callers unwind.
+int protectedMemberGet(lua_State* L)
+{
+  lua_gettable(L, 1);
+  return 1;
+}
+
+int protectedMemberSet(lua_State* L)
+{
+  lua_settable(L, 1);
+  return 0;
+}
+
+void callMemberAccess(lua_State* L, int arguments, int results)
+{
+  tStringBuffer error;
+  if(luaCompat_call(L, arguments, results, error) != 0)
+    COM_EXCEPTION(error.getBuffer() ? error.getBuffer() : "Lua member access failed");
+}
+
+// Match lua_gettable(L, -2), including preserving the table beneath its result.
+void getMember(lua_State* L)
+{
+  const int table = lua_gettop(L) - 1;
+  if(!lua_checkstack(L, 3))
+    COM_EXCEPTION("Insufficient Lua stack space for member lookup");
+  lua_pushcfunction(L, protectedMemberGet);
+  lua_pushvalue(L, table);
+  lua_pushvalue(L, table + 1);
+  callMemberAccess(L, 2, 1);
+  lua_replace(L, -2);
+}
+
+// Match lua_settable(L, -3), consuming the key and value but retaining the table.
+void setMember(lua_State* L)
+{
+  const int table = lua_gettop(L) - 2;
+  if(!lua_checkstack(L, 4))
+    COM_EXCEPTION("Insufficient Lua stack space for member assignment");
+  lua_pushcfunction(L, protectedMemberSet);
+  lua_pushvalue(L, table);
+  lua_pushvalue(L, table + 1);
+  lua_pushvalue(L, table + 2);
+  callMemberAccess(L, 3, 0);
+  lua_pop(L, 2);
+}
+}
+
 // hacks for certain compilers
 #if defined(__MINGW32__) || defined(__CYGWIN__)
 #define GUIDKIND_DEFAULT_SOURCE_DISP_IID 1
@@ -609,7 +660,7 @@ HRESULT tLuaDispatch::propertyget(const char* name,
 {
   // the value contained in the table.
   lua_pushstring(L, name);
-  lua_gettable(L, -2);
+  getMember(L);
   stkIndex member = lua_gettop(L);
 
   if(lua_isnil(L, member))
@@ -644,7 +695,7 @@ HRESULT tLuaDispatch::propertyget(const char* name,
       lua_pushvalue(L, member);
       typehandler->com2lua(L, pdispparams->rgvarg[pdispparams->cArgs - 1]);
 
-      lua_gettable(L, -2);
+      getMember(L);
       member = lua_gettop(L);
     }
     else
@@ -673,7 +724,7 @@ HRESULT tLuaDispatch::propertyput(const char* name,
 {
   // gets the current of the field
   lua_pushstring(L, name);
-  lua_gettable(L, -2);
+  getMember(L);
 
   // If field to be set holds a function, calls it passing the
   // value to be set
@@ -708,7 +759,7 @@ HRESULT tLuaDispatch::propertyput(const char* name,
     // value to be set
     typehandler->com2lua(L, pdispparams->rgvarg[pdispparams->cArgs - 1]);
 
-    lua_settable(L, -3);
+    setMember(L);
   }
   else if(pdispparams->cArgs == 2) // parameterized propertyput
   {
@@ -724,7 +775,7 @@ HRESULT tLuaDispatch::propertyput(const char* name,
       // value to be set
       typehandler->com2lua(L, pdispparams->rgvarg[pdispparams->cArgs - 2]);
 
-      lua_settable(L, -3);
+      setMember(L);
     }
     else
     {
@@ -757,7 +808,7 @@ HRESULT tLuaDispatch::method(const char* name,
 {
   // push Lua function (member) from implementation table
   lua_pushstring(L, name);
-  lua_gettable(L, -2);
+  getMember(L);
   const stkIndex memberidx = lua_gettop(L);  // and stack index
       
   // test whether it's really a function

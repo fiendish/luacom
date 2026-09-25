@@ -20,6 +20,7 @@ extern "C"
 #include <limits.h>
 #include <stdio.h>
 #include <vector>
+#include <exception>
 
 #include "tLuaCOMTypeHandler.h"
 #include "tLuaCOM.h"
@@ -50,10 +51,40 @@ static const char *const com_type_names[] = {
 
 namespace
 {
+// Calls that can run Lua code must fail through C++ exceptions here, so the
+// surrounding VARIANT, SAFEARRAY and string owners are unwound normally.
+void callLuaFunction(lua_State* L, int arguments, int results)
+{
+  tStringBuffer error;
+  if(luaCompat_call(L, arguments, results, error) != 0)
+    TYPECONV_ERROR(error.getBuffer() ? error.getBuffer() : "Lua conversion failed");
+}
+
+int protectedTableLookup(lua_State* L)
+{
+  lua_gettable(L, 1);
+  return 1;
+}
+
+void getLuaTableValue(lua_State* L, int index)
+{
+  if(index < 0 && index > LUA_REGISTRYINDEX)
+    index += lua_gettop(L) + 1;
+  if(!lua_checkstack(L, 3))
+    TYPECONV_ERROR("Insufficient Lua stack space for table lookup");
+
+  lua_pushcfunction(L, protectedTableLookup);
+  lua_pushvalue(L, index);
+  lua_pushvalue(L, -3); // original key, below the function and table
+  callLuaFunction(L, 2, 1);
+  lua_replace(L, -2); // replace the original key with the result
+}
+
+
 class BstrArray
 {
 public:
-  explicit BstrArray(size_t count) : values(count, NULL) {}
+  BstrArray() {}
   ~BstrArray()
   {
     for(size_t i = 0; i < values.size(); i++)
@@ -61,6 +92,7 @@ public:
   }
 
   BSTR* data() { return values.empty() ? NULL : &values[0]; }
+  void allocate(size_t count) { values.resize(count, NULL); }
 
 private:
   std::vector<BSTR> values;
@@ -394,25 +426,96 @@ void tLuaCOMTypeHandler::pushTableVarUnsignedInteger(lua_State *L, VARTYPE vt, U
   If is_variant, then Lua value will be in table form (e.g. `{Type=...}`),
   which is more explicit.
 */
+// Own conversion temporaries outside the Lua protected frame: allocation
+// failures use longjmp and would otherwise bypass their C++ destructors.
+struct tLuaCOMTypeHandler::ConversionContext
+{
+  ConversionContext(tLuaCOMTypeHandler* handler, VARIANTARG original, bool explicit_type)
+    : handler(handler), original(original), explicit_type(explicit_type), locked_array(NULL) {}
+
+  ~ConversionContext()
+  {
+    // A locked SAFEARRAY cannot be destroyed by the VariantValue members.
+    if(locked_array)
+      SafeArrayUnaccessData(locked_array);
+  }
+
+  tLuaCOMTypeHandler* handler;
+  VARIANTARG original; // borrowed; the caller owns this value
+  bool explicit_type;
+  VariantValue value, converted, formatted_date;
+  tStringBuffer text, date_format;
+  std::vector<wchar_t> formatted;
+  tLuaVector array_vector;
+  std::vector<SAFEARRAYBOUND> array_bounds;
+  std::vector<long> array_dimensions, array_indices;
+  VariantValue array_element;
+  BstrArray record_field_names;
+  VariantValue record_field;
+  SAFEARRAY* locked_array;
+  std::exception_ptr exception;
+};
+
 void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_variant)
+{
+  const int top = lua_gettop(L);
+  if(!lua_checkstack(L, 2))
+    LUACOM_EXCEPTION(MALLOC_ERROR);
+
+  int status;
+  std::exception_ptr exception;
+  {
+    ConversionContext context(this, varg_orig, is_variant);
+    // These Lua allocations happen before the context acquires native data.
+    lua_pushlightuserdata(L, &context);
+    lua_pushcclosure(L, protectedCom2Lua, 1);
+    status = lua_pcall(L, 0, 1, 0);
+    exception = context.exception;
+  }
+  if(exception)
+  {
+    lua_settop(L, top);
+    std::rethrow_exception(exception);
+  }
+  if(status != 0)
+    lua_error(L);
+}
+
+int tLuaCOMTypeHandler::protectedCom2Lua(lua_State* L)
+{
+  ConversionContext* context = static_cast<ConversionContext*>(
+    lua_touserdata(L, lua_upvalueindex(1)));
+  try
+  {
+    context->handler->com2luaImpl(L, *context);
+    return 1;
+  }
+  catch(...)
+  {
+    context->exception = std::current_exception();
+    return 0;
+  }
+}
+
+void tLuaCOMTypeHandler::com2luaImpl(lua_State* L, ConversionContext& context)
 {
   LUASTACK_SET(L);
   LuaStackGuard stack_guard(L);
 
   HRESULT hr = S_OK;
 
-  VariantValue varg_value;
-  VARIANT& varg = varg_value.value;
+  VARIANT& varg = context.value.value;
+  const bool is_variant = context.explicit_type;
 
   lua_getglobal(L, "luacom");
   lua_pushstring(L, "TableVariants");
-  lua_gettable(L, -2);
+  getLuaTableValue(L, -2);
   bool table_variants = lua_toboolean(L, -1) != 0;
   lua_pop(L, 2);
 
 
   // dereferences VARIANTARG (if necessary)
-  hr = VariantCopyInd(&varg, &varg_orig);
+  hr = VariantCopyInd(&varg, &context.original);
   if (FAILED(hr))
     COM_ERROR(tUtil::GetErrorMessage(hr));
 
@@ -422,16 +525,15 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
     // treats an array of VT_UI1 as an array of char and
     // converts it to a string
     if (varg.vt == (VT_ARRAY | VT_UI1))
-      safearray2string(L, varg);
+      safearray2string(L, varg, context);
     else
-      safearray_com2lua(L, varg);
+      safearray_com2lua(L, varg, context);
     VariantClear(&varg);
   }
   else
   {
     // used in some type conversions
-    VariantValue new_varg_value;
-    VARIANTARG& new_varg = new_varg_value.value;
+    VARIANTARG& new_varg = context.converted.value;
 
     try
     {
@@ -497,15 +599,17 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
         {
           lua_getglobal(L,"luacom");
           lua_pushstring(L,"DateFormat");
-          lua_gettable(L, -2);
-          tStringBuffer dateformat(lua_tostring(L, -1));
+          getLuaTableValue(L, -2);
+          context.date_format = tStringBuffer(lua_tostring(L, -1));
+          const char* dateformat = context.date_format.getBuffer();
              lua_pop(L, 2);
           if(dateformat == NULL || (strcmp("string",dateformat)==0))
           {
             HRESULT hr = VariantChangeType(&new_varg, &varg, 0, VT_BSTR);
             CHK_COM_CODE(hr);
 
-            lua_pushstring(L, tUtil::bstr2string(new_varg.bstrVal));
+            context.text = tUtil::bstr2string(new_varg.bstrVal);
+            lua_pushstring(L, context.text);
           }
           else if(strcmp("table",dateformat)==0)
           {
@@ -560,7 +664,8 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
               HRESULT hr = VariantChangeType(
                 &new_varg, &rounded_varg, 0, VT_BSTR);
               CHK_COM_CODE(hr);
-              lua_pushstring(L, tUtil::bstr2string(new_varg.bstrVal));
+              context.text = tUtil::bstr2string(new_varg.bstrVal);
+              lua_pushstring(L, context.text);
               break;
             }
 
@@ -571,7 +676,8 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
             if(date_length == 0 || time_length == 0)
               COM_ERROR(tUtil::GetErrorMessage(GetLastError()));
 
-            std::vector<wchar_t> formatted(date_length + time_length);
+            std::vector<wchar_t>& formatted = context.formatted;
+            formatted.resize(date_length + time_length);
             if(GetDateFormatW(
                  LOCALE_USER_DEFAULT, DATE_SHORTDATE, &date, NULL,
                  &formatted[0], date_length) == 0)
@@ -583,13 +689,12 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
                  &formatted[date_length], time_length) == 0)
               COM_ERROR(tUtil::GetErrorMessage(GetLastError()));
 
-            VariantValue formatted_date;
+            VariantValue& formatted_date = context.formatted_date;
             formatted_date.value.vt = VT_BSTR;
             formatted_date.value.bstrVal = SysAllocString(&formatted[0]);
             CHKMALLOC(formatted_date.value.bstrVal);
-            tStringBuffer date_string =
-              tUtil::bstr2string(formatted_date.value.bstrVal);
-            lua_pushstring(L, date_string);
+            context.text = tUtil::bstr2string(formatted_date.value.bstrVal);
+            lua_pushstring(L, context.text);
           }
 
           break;
@@ -624,7 +729,8 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
 
       case VT_BSTR:
         {
-          tStringBuffer str = tUtil::bstr2string(varg.bstrVal);
+          context.text = tUtil::bstr2string(varg.bstrVal);
+          tStringBuffer& str = context.text;
             if(is_variant && table_variants) {
               lua_newtable(L);
             lua_pushstring(L, "Type");
@@ -710,7 +816,6 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
           }
 
           // defaults to pushing and userdata for the IUnknown
-          varg.punkVal->AddRef();
           pushIUnknown(L, varg.punkVal);
           break;
         }
@@ -724,7 +829,8 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
           hr = varg.pRecInfo->GetFieldNames(&field_count, NULL);
           CHK_COM_CODE(hr);
 
-          BstrArray field_names(field_count);
+          BstrArray& field_names = context.record_field_names;
+          field_names.allocate(field_count);
           ULONG returned_count = field_count;
           hr = varg.pRecInfo->GetFieldNames(&returned_count, field_names.data());
           CHK_COM_CODE(hr);
@@ -732,13 +838,17 @@ void tLuaCOMTypeHandler::com2lua(lua_State* L, VARIANTARG varg_orig, bool is_var
           lua_newtable(L);
           for(ULONG i = 0; i < returned_count; i++)
           {
-            VariantValue field;
-            hr = varg.pRecInfo->GetField(varg.pvRecord, field_names.data()[i], &field.value);
+            VARIANT& field = context.record_field.value;
+            hr = varg.pRecInfo->GetField(varg.pvRecord, field_names.data()[i], &field);
             CHK_COM_CODE(hr);
 
-            lua_pushstring(L, tUtil::bstr2string(field_names.data()[i]));
-            com2lua(L, field.value, true);
+            // Lua allocation errors bypass local C++ destructors. Keep both
+            // the copied field and its converted name in the outer context.
+            context.text = tUtil::bstr2string(field_names.data()[i]);
+            lua_pushstring(L, context.text);
+            com2lua(L, field, true);
             lua_settable(L, -3);
+            VariantClear(&field);
           }
           break;
         }
@@ -774,23 +884,23 @@ tLuaCOM *tLuaCOMTypeHandler::convert_table(lua_State *L, stkIndex luaval)
   stkIndex table = lua_gettop(L);
   lua_pushvalue(L, luaval);
   lua_pushstring(L, "typelib");
-  lua_gettable(L, table);
+  getLuaTableValue(L, table);
   if(!lua_isnil(L, -1))
   {
     lua_getglobal(L, "luacom");
     lua_pushstring(L, "ImplInterfaceFromTypelib");
-    lua_gettable(L, -2);
+    getLuaTableValue(L, -2);
     lua_remove(L, -2);
     lua_insert(L, table+1);
     lua_pushstring(L, "interface");
-    lua_gettable(L, table);
+    getLuaTableValue(L, table);
     lua_pushstring(L, "coclass");
-    lua_gettable(L, table);
+    getLuaTableValue(L, table);
     if(lua_isnil(L, -1)) {
       lua_pop(L, 1);
-      lua_call(L, 3, 1);
+      callLuaFunction(L, 3, 1);
     } else {
-      lua_call(L, 4, 1);
+      callLuaFunction(L, 4, 1);
     }
   }
   else
@@ -798,14 +908,14 @@ tLuaCOM *tLuaCOMTypeHandler::convert_table(lua_State *L, stkIndex luaval)
     lua_pop(L, 1);
     lua_getglobal(L, "luacom");
     lua_pushstring(L, "ImplInterface");
-    lua_gettable(L, -2);
+    getLuaTableValue(L, -2);
     lua_remove(L, -2);
     lua_insert(L, table+1);
     lua_pushstring(L, "progid");
-    lua_gettable(L, table);
+    getLuaTableValue(L, table);
     lua_pushstring(L, "interface");
-    lua_gettable(L, table);
-    lua_call(L, 3, 1);
+    getLuaTableValue(L, table);
+    callLuaFunction(L, 3, 1);
   }
   lcom = from_lua(L, lua_gettop(L));
   lua_settop(L, table-1);
@@ -910,7 +1020,7 @@ void tLuaCOMTypeHandler::lua2com(lua_State* L, stkIndex luaval, VARIANTARG& varg
           case LUA_TFUNCTION:
             lua_pushvalue(L, luaval);
             lua_pushnumber(L, type);
-            lua_call(L, 2, 1);
+            callLuaFunction(L, 2, 1);
             lcom = from_lua(L, lua_gettop(L));
             lua_pop(L, 1);
             break;
@@ -925,11 +1035,11 @@ void tLuaCOMTypeHandler::lua2com(lua_State* L, stkIndex luaval, VARIANTARG& varg
       }
       else {
         lua_pushstring(L, "Type");
-        lua_gettable(L, luaval);
+        getLuaTableValue(L, luaval);
         if(!lua_isnil(L, -1)) { // Table describes a variant
           tStringBuffer vtype(lua_tostring(L, -1));
           lua_pushstring(L, "Value");
-          lua_gettable(L, luaval);
+          getLuaTableValue(L, luaval);
           if(strcmp(vtype, "double") == 0) {
             varg.vt = VT_R8;
             varg.dblVal = lua_tonumber(L, -1);
@@ -1055,42 +1165,42 @@ void tLuaCOMTypeHandler::lua2com(lua_State* L, stkIndex luaval, VARIANTARG& varg
           int isdate = 0;
           SYSTEMTIME date;
           lua_pushstring(L, "Day");
-          lua_gettable(L, luaval);
+          getLuaTableValue(L, luaval);
           isdate = isdate || !lua_isnil(L, -1);
           date.wDay = (WORD)lua_tonumber(L, -1);
           lua_pop(L, 1);
           lua_pushstring(L, "DayOfWeek");
-          lua_gettable(L, luaval);
+          getLuaTableValue(L, luaval);
           isdate = isdate || !lua_isnil(L, -1);
           date.wDayOfWeek = (WORD)lua_tonumber(L, -1);
           lua_pop(L, 1);
           lua_pushstring(L, "Month");
-          lua_gettable(L, luaval);
+          getLuaTableValue(L, luaval);
           isdate = isdate || !lua_isnil(L, -1);
           date.wMonth = (WORD)lua_tonumber(L, -1);
           lua_pop(L, 1);
           lua_pushstring(L, "Year");
-          lua_gettable(L, luaval);
+          getLuaTableValue(L, luaval);
           isdate = isdate || !lua_isnil(L, -1);
           date.wYear = (WORD)lua_tonumber(L, -1);
           lua_pop(L, 1);
           lua_pushstring(L, "Hour");
-          lua_gettable(L, luaval);
+          getLuaTableValue(L, luaval);
           isdate = isdate || !lua_isnil(L, -1);
           date.wHour = (WORD)lua_tonumber(L, -1);
           lua_pop(L, 1);
           lua_pushstring(L, "Minute");
-          lua_gettable(L, luaval);
+          getLuaTableValue(L, luaval);
           isdate = isdate || !lua_isnil(L, -1);
           date.wMinute = (WORD)lua_tonumber(L, -1);
           lua_pop(L, 1);
           lua_pushstring(L, "Second");
-          lua_gettable(L, luaval);
+          getLuaTableValue(L, luaval);
           isdate = isdate || !lua_isnil(L, -1);
           date.wSecond = (WORD)lua_tonumber(L, -1);
           lua_pop(L, 1);
           lua_pushstring(L, "Milliseconds");
-          lua_gettable(L, luaval);
+          getLuaTableValue(L, luaval);
           isdate = isdate || !lua_isnil(L, -1);
           date.wMilliseconds = (WORD)lua_tonumber(L, -1);
           lua_pop(L, 1);
@@ -1821,21 +1931,24 @@ void tLuaCOMTypeHandler::put_in_array(SAFEARRAY* safearray,
 stkIndex tLuaCOMTypeHandler::get_from_array(lua_State* L,
                                             SAFEARRAY* safearray,
                                             long *indices,
-                                            const VARTYPE& vt
+                                            const VARTYPE& vt,
+                                            VARIANTARG& value
                                             )
 {
-  VariantValue varg;
+  // The conversion context owns this element across nested Lua errors.
+  VariantClear(&value);
+  ZeroMemory(&value, sizeof(value)); // safe cleanup if GetElement fails before writing
   void *pv = NULL;
   if(vt == VT_VARIANT)
   {
-    pv = &varg.value;
+    pv = &value;
   }
   else
   {
-    varg.value.vt = vt;
+    value.vt = vt;
 
     // e' uma union, tanto faz de quem pego o ponteiro
-    pv = (void *) &varg.value.dblVal;
+    pv = (void *) &value.dblVal;
   }
 
   HRESULT hr = SafeArrayGetElement(safearray, indices, pv);
@@ -1844,7 +1957,8 @@ stkIndex tLuaCOMTypeHandler::get_from_array(lua_State* L,
     LUACOM_EXCEPTION(INTERNAL_ERROR);
   }
 
-  com2lua(L, varg.value);
+  com2lua(L, value);
+  VariantClear(&value);
 
   return lua_gettop(L);
 }
@@ -2044,7 +2158,8 @@ void tLuaCOMTypeHandler::string2safearray(const char* str, size_t len, VARIANTAR
  Converts SAFEARRAY (of VT_UI1) to array of bytes.
  Assumes SAFEARRAY is one-dimensional.
 */
-void tLuaCOMTypeHandler::safearray2string(lua_State* L, VARIANTARG & varg)
+void tLuaCOMTypeHandler::safearray2string(lua_State* L, VARIANTARG & varg,
+                                        ConversionContext& context)
 {
   CHECKPRECOND(varg.vt & (VT_ARRAY | VT_UI1));
   CHECKPRECOND(varg.parray->cDims == 1);
@@ -2056,10 +2171,12 @@ void tLuaCOMTypeHandler::safearray2string(lua_State* L, VARIANTARG & varg)
   void * buffer = NULL;
   hr = SafeArrayAccessData(varg.parray, &buffer);
   CHK_COM_CODE(hr);
+  context.locked_array = varg.parray;
 
   lua_pushlstring(L, (char*) buffer, size);
 
-  SafeArrayUnaccessData(varg.parray);
+  CHK_COM_CODE(SafeArrayUnaccessData(varg.parray));
+  context.locked_array = NULL;
 }
 
 /**
@@ -2083,115 +2200,68 @@ long* tLuaCOMTypeHandler::dimensionsFromBounds(SAFEARRAYBOUND* bounds,
 
 
 
-void tLuaCOMTypeHandler::safearray_com2lua(lua_State* L, VARIANTARG & varg)
+void tLuaCOMTypeHandler::safearray_com2lua(lua_State* L, VARIANTARG & varg,
+                                          ConversionContext& context)
 {
   CHECK(varg.vt & VT_ARRAY, PARAMETER_OUT_OF_RANGE);
-
-  long *indices           = NULL;
-  SAFEARRAYBOUND* bounds  = NULL;
-
-  try
+  SAFEARRAY* safearray = varg.parray;
+  if(safearray == NULL)
   {
-    SAFEARRAY* safearray = varg.parray;
-
-    // check for NULL or empty array (is this enough?)
-    // returns an empty table in both cases, for consistency (also eases client code)
-    if(safearray == NULL) {
-      lua_newtable(L);
-      return;
-    }
-
-    // get dimensions
-    const int num_dimensions = SafeArrayGetDim(safearray);
-    CHECK(num_dimensions > 0, TYPECONV_ERROR);
-    // checks for empty array, must be done in the 'first' dimension
-    if(safearray->rgsabound[num_dimensions - 1].cElements == 0) {
-      lua_newtable(L);
-      return;
-    }
-
-    bounds = getRightOrderedBounds
-      (
-      safearray->rgsabound,
-      num_dimensions
-      );
-
-
-    tLuaVector luavector;
-
-    {
-      long *dimensions = dimensionsFromBounds(bounds, num_dimensions);
-
-      try
-      {
-        luavector.InitVectorFromDimensions(dimensions, num_dimensions);
-      }
-      catch(class tLuaCOMException&)
-      {
-        delete[] dimensions;
-        throw;
-      }
-
-      delete[] dimensions;
-    }
-
-    // initializes indices
-    indices = new long[num_dimensions];
-
-    for(int i = 0; i < num_dimensions; i++)
-      indices[i] = bounds[i].lLbound;
-
-    // gets array data type
-    VARTYPE vt = VT_EMPTY;
-    HRESULT hr = SafeArrayGetVartype(safearray, &vt);
-    if (FAILED(hr))
-      LUACOM_EXCEPTION(INTERNAL_ERROR);
-
-    // holds index to Lua objects
-    stkIndex luaval = 0;
-
-    // saves current stack position
-    stkIndex stacktop = lua_gettop(L);
-
-    // allocates enough stack room
-    lua_checkstack(L, luavector.size()*2);
-
-    // copy elements one-by-one
-    do
-    {
-      // get from array
-      luaval = get_from_array(L, safearray, indices, vt);
-
-      luavector.setindex(L, luaval, indices, num_dimensions, bounds);
-    }
-    while(inc_indices(indices, bounds, num_dimensions)); // incrementa indices
-
-    // tries to create Lua table on top of stack
-    bool succeeded = luavector.CreateTable(L);
-
-    // remove temporary objects
-    stkIndex clean_until = lua_gettop(L);
-
-    if(succeeded)
-      clean_until--; // doesn't clean created table!
-
-    while(clean_until > stacktop)
-    {
-      lua_remove(L, clean_until);
-      clean_until--;
-    }
-  }
-  catch(...)
-  {
-    delete[] bounds;
-    delete[] indices;
-    throw;
+    lua_newtable(L);
+    return;
   }
 
-  delete[] bounds;
-  delete[] indices;
+  const int num_dimensions = SafeArrayGetDim(safearray);
+  CHECK(num_dimensions > 0, TYPECONV_ERROR);
+  if(safearray->rgsabound[num_dimensions - 1].cElements == 0)
+  {
+    lua_newtable(L);
+    return;
+  }
 
-  return;
+  // All native bookkeeping lives outside the Lua protected frame. Building
+  // the output table or converting an element can fail with a Lua longjmp.
+  context.array_bounds.resize(num_dimensions);
+  context.array_dimensions.resize(num_dimensions);
+  context.array_indices.resize(num_dimensions);
+  SAFEARRAYBOUND* bounds = &context.array_bounds[0];
+  long* indices = &context.array_indices[0];
+  for(int i = 0; i < num_dimensions; i++)
+  {
+    bounds[i] = safearray->rgsabound[num_dimensions - i - 1];
+    CHECK(bounds[i].cElements <= LONG_MAX, TYPECONV_ERROR);
+    context.array_dimensions[i] = static_cast<long>(bounds[i].cElements);
+    indices[i] = bounds[i].lLbound;
+  }
+
+  tLuaVector& luavector = context.array_vector;
+  luavector.InitVectorFromDimensions(&context.array_dimensions[0], num_dimensions);
+
+  VARTYPE vt = VT_EMPTY;
+  HRESULT hr = SafeArrayGetVartype(safearray, &vt);
+  if(FAILED(hr))
+    LUACOM_EXCEPTION(INTERNAL_ERROR);
+
+  const stkIndex stacktop = lua_gettop(L);
+  const long elements = luavector.size();
+  if(elements < 0 || elements > INT_MAX / 2 ||
+     !lua_checkstack(L, static_cast<int>(elements * 2)))
+    luaL_error(L, "Insufficient Lua stack space for safearray");
+
+  do
+  {
+    stkIndex luaval = get_from_array(L, safearray, indices, vt,
+                                     context.array_element.value);
+    luavector.setindex(L, luaval, indices, num_dimensions, bounds);
+  }
+  while(inc_indices(indices, bounds, num_dimensions));
+
+  bool succeeded = luavector.CreateTable(L);
+  stkIndex clean_until = lua_gettop(L);
+  if(succeeded)
+    clean_until--; // keep the result table
+  while(clean_until > stacktop)
+    lua_remove(L, clean_until--);
 }
 
 
@@ -2458,7 +2528,9 @@ bool tLuaCOMTypeHandler::isIUnknown(lua_State* L, stkIndex value)
 void tLuaCOMTypeHandler::pushIUnknown(lua_State* L, IUnknown *punk)
 {
   luaCompat_pushTypeByName(L, MODULENAME, LCOM_IUNKNOWN_TYPENAME);
-  luaCompat_newTypedObject(L, punk);
+  // Acquire the wrapper's reference only after Lua owns its userdata.
+  if(luaCompat_newTypedObject(L, punk))
+    punk->AddRef();
 }
 
 

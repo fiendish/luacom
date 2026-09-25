@@ -27,6 +27,8 @@ public:
   virtual ~tLuaCOMEnumerator();
 
 protected:
+  struct NextContext;
+  static int protectedNext(lua_State* L);
   int callCOMmethod(lua_State* L, const char* name, int first_param, int last_param);
   static int call_method(lua_State* L);
   static int garbagecollect(lua_State* L);

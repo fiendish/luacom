@@ -138,6 +138,19 @@ void luacom_error(lua_State* L, const char* message)
   luacom_err(L, message, false);
 }
 
+// Error-producing callbacks return -1 with a Lua-owned message on the stack.
+// Only raise after the callback has returned, destroying its C++ exceptions,
+// temporary strings and COM owners. A Lua longjmp must not skip those scopes.
+template<lua_CFunction Function, bool IsAPI>
+static int reportLuaCOMCall(lua_State* L)
+{
+  int results = Function(L);
+  if(results >= 0)
+    return results;
+  luacom_err(L, lua_tostring(L, -1), IsAPI);
+  return 0;
+}
+
 static void luacom_APIerror(lua_State* L, const char* message)
 {
   luacom_err(L, message, true);
@@ -171,8 +184,8 @@ static int luacom_ShowHelp(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
   if(pHelpFile != NULL && strlen(pHelpFile) > 0)
   {
@@ -284,8 +297,8 @@ static int luacom_Connect(lua_State *L)
       luaL_unref(L, LUA_REGISTRYINDEX, ref);
     if(server)
       server->Unlock();
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
   catch(const std::bad_alloc&)
   {
@@ -294,8 +307,8 @@ static int luacom_Connect(lua_State *L)
     if(server)
       server->Unlock();
     tLuaCOMException e(tLuaCOMException::MALLOC_ERROR, __FILE__, __LINE__);
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   LuaBeans::push(L, server); 
@@ -321,16 +334,16 @@ static int luacom_Connect(lua_State *L)
   Implementa uma interface descrida em uma type library
   dada
 */
-static tLuaCOM *luacom_ImplInterfaceFromTypelibHelper(lua_State *L)
+static int luacom_ImplInterfaceFromTypelib(lua_State *L)
 {
   if(lua_type(L, 1) != LUA_TTABLE && lua_type(L,1) != LUA_TUSERDATA)
   {
     luaL_argerror(L, 1, "Implementation must be a table or a userdata");
   }
 
-  tStringBuffer typelib_name(luaL_checklstring(L, 2, NULL));
-  tStringBuffer pcInterface(luaL_checklstring(L, 3, NULL));
-  tStringBuffer coclassname(luaL_optlstring(L, 4, NULL, NULL));
+  const char* typelib_name = luaL_checklstring(L, 2, NULL);
+  const char* pcInterface = luaL_checklstring(L, 3, NULL);
+  const char* coclassname = luaL_optlstring(L, 4, NULL, NULL);
 
   lua_pushvalue(L, 1);
   int ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -362,31 +375,20 @@ static tLuaCOM *luacom_ImplInterfaceFromTypelibHelper(lua_State *L)
   {
     if(ref != LUA_NOREF)
       luaL_unref(L, LUA_REGISTRYINDEX, ref);
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
   catch(const std::bad_alloc&)
   {
     if(ref != LUA_NOREF)
       luaL_unref(L, LUA_REGISTRYINDEX, ref);
     tLuaCOMException e(tLuaCOMException::MALLOC_ERROR, __FILE__, __LINE__);
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
-  return lcom;
-}
-
-static int luacom_ImplInterfaceFromTypelib(lua_State *L)
-{
-  tLuaCOM *lcom = luacom_ImplInterfaceFromTypelibHelper(L);
-  if(lcom)
-  {
-    LuaBeans::push(L, lcom);
-    return 1;
-  }
-  else
-    return 0;
+  LuaBeans::push(L, lcom);
+  return 1;
 }
 
 
@@ -400,7 +402,7 @@ static int luacom_ImplInterfaceFromTypelib(lua_State *L)
       Interface: string,
   Out: LuaCOM_obj (table with tag LuaCOM)
 */
-static tLuaCOM *luacom_ImplInterfaceHelper(lua_State *L)
+static int luacom_ImplInterface(lua_State *L)
 {
   // gets parameters
   if(lua_type(L, 1) != LUA_TTABLE && lua_type(L,1) != LUA_TUSERDATA)
@@ -408,8 +410,8 @@ static tLuaCOM *luacom_ImplInterfaceHelper(lua_State *L)
     luaL_argerror(L, 1, "Implementation must be a table or a userdata");
   }
 
-  tStringBuffer pcProgID(luaL_checklstring(L, 2, NULL));
-  tStringBuffer pcInterface(luaL_checklstring(L, 3, NULL));
+  const char* pcProgID = luaL_checklstring(L, 2, NULL);
+  const char* pcInterface = luaL_checklstring(L, 3, NULL);
 
   // pushes lua table on top of stack
   lua_pushvalue(L, 1);
@@ -442,29 +444,19 @@ static tLuaCOM *luacom_ImplInterfaceHelper(lua_State *L)
       luaL_unref(L, LUA_REGISTRYINDEX, ref);
     if(lcom)
       lcom->Unlock();
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
   catch(const std::bad_alloc&)
   {
     if(ref != LUA_NOREF)
       luaL_unref(L, LUA_REGISTRYINDEX, ref);
     tLuaCOMException e(tLuaCOMException::MALLOC_ERROR, __FILE__, __LINE__);
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
-  return lcom;
-}
-
-static int luacom_ImplInterface(lua_State *L)
-{
-  tLuaCOM* lcom = luacom_ImplInterfaceHelper(L);
-  if(lcom)
-  {
-    LuaBeans::push(L, lcom);
-    return 1;
-  }
-  else return 0;
+  LuaBeans::push(L, lcom);
+  return 1;
 }
 
 
@@ -515,15 +507,15 @@ static int luacom_CLSIDfromProgID(lua_State *L)
   {
     CoTaskMemFree(clsid_str);
 
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
   catch(const std::bad_alloc&)
   {
     CoTaskMemFree(clsid_str);
     tLuaCOMException e(tLuaCOMException::MALLOC_ERROR, __FILE__, __LINE__);
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   CoTaskMemFree(clsid_str);
@@ -558,15 +550,15 @@ static int luacom_ProgIDfromCLSID(lua_State *L)
   {
     CoTaskMemFree(progId);
 
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
   catch(const std::bad_alloc&)
   {
     CoTaskMemFree(progId);
     tLuaCOMException e(tLuaCOMException::MALLOC_ERROR, __FILE__, __LINE__);
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   CoTaskMemFree(progId);
@@ -625,8 +617,8 @@ static int luacom_CreateObject(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   LuaBeans::push(L, lcom);
@@ -679,8 +671,8 @@ static int luacom_GetObject(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   LuaBeans::push(L, lcom);
@@ -704,13 +696,13 @@ static int luacom_addConnection(lua_State *L)
   }
   catch(tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
   if(cookie == 0)
   {
-    luacom_APIerror(L, "Could not establish connection");
-    return 0;
+    lua_pushstring(L, "Could not establish connection");
+    return -1;
   }
 
   lua_pushnumber(L, cookie);
@@ -732,8 +724,8 @@ static int luacom_releaseConnection(lua_State *L)
     try { lcom->releaseConnection(server, cookie); }
     catch(class tLuaCOMException& e)
     {
-      luacom_APIerror(L, e.getMessage());
-      return 0;
+      lua_pushstring(L, e.getMessage());
+      return -1;
     }
   }
   else
@@ -741,8 +733,8 @@ static int luacom_releaseConnection(lua_State *L)
     try { lcom->releaseConnection(); }
     catch(class tLuaCOMException& e)
     {
-      luacom_APIerror(L, e.getMessage());
-      return 0;
+      lua_pushstring(L, e.getMessage());
+      return -1;
     }
   }
 
@@ -838,8 +830,8 @@ static int luacom_NewObjectOrControl(lua_State *L, int type)
       luaL_unref(L, LUA_REGISTRYINDEX, ref);
     if(lcom)
       lcom->Unlock();
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
   catch(const std::bad_alloc&)
   {
@@ -848,8 +840,8 @@ static int luacom_NewObjectOrControl(lua_State *L, int type)
     if(lcom)
       lcom->Unlock();
     tLuaCOMException e(tLuaCOMException::MALLOC_ERROR, __FILE__, __LINE__);
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   // returns LuaCOM object and connection point
@@ -915,8 +907,8 @@ static int luacom_ExposeObject(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   lua_pushnumber(L, cookie);
@@ -944,8 +936,8 @@ static int luacom_RevokeObject(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   lua_pushboolean(L, true);
@@ -1081,35 +1073,36 @@ static int luacom_RegisterObject(lua_State *L)
     lua_gettable(L, 1);
     bool control = lua_toboolean(L, -1) != 0;
 
-    // gets the registration information from the registration table
+    // Keep field strings rooted on the Lua stack until all lookups finish.
+    // A later __index error must not bypass a native string destructor.
     lua_pushstring(L, "VersionIndependentProgID");
     lua_gettable(L, 1);
-	  tStringBuffer VersionIndependentProgID(lua_tostring(L, -1));
+    const char* VersionIndependentProgID = lua_tostring(L, -1);
 
     // gets the registration information from the registration table
     lua_pushstring(L, "ProgID");
     lua_gettable(L, 1);
-    tStringBuffer ProgID(lua_tostring(L, -1));
+    const char* ProgID = lua_tostring(L, -1);
 
     lua_pushstring(L, "TypeLib");
     lua_gettable(L, 1);
-    tStringBuffer typelib_path(lua_tostring(L, -1));
+    const char* typelib_path = lua_tostring(L, -1);
 
     lua_pushstring(L, "CoClass");
     lua_gettable(L, 1);
-    tStringBuffer CoClass(lua_tostring(L, -1));
+    const char* CoClass = lua_tostring(L, -1);
 
     lua_pushstring(L, "ComponentName");
     lua_gettable(L, 1);
-    tStringBuffer ComponentName(lua_tostring(L, -1));
+    const char* ComponentName = lua_tostring(L, -1);
 
     lua_pushstring(L, "Arguments");
     lua_gettable(L, 1);
-    tStringBuffer arguments(lua_tostring(L, -1));
+    const char* arguments = lua_tostring(L, -1);
 
     lua_pushstring(L, "ScriptFile");
     lua_gettable(L, 1);
-    tStringBuffer scriptFile(lua_tostring(L, -1));
+    const char* scriptFile = lua_tostring(L, -1);
 
     CHK_LCOM_ERR(VersionIndependentProgID && ProgID && typelib_path && CoClass,
       "Incomplete registration table.");
@@ -1300,8 +1293,8 @@ static int luacom_RegisterObject(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   // signals success
@@ -1331,23 +1324,23 @@ static int luacom_UnRegisterObject(lua_State *L)
   try
   {
 
-    // gets the registration information from the registration table
+    // Keep field strings rooted on the Lua stack until all lookups finish.
     lua_pushstring(L, "VersionIndependentProgID");
     lua_gettable(L, 1);
-    tStringBuffer VersionIndependentProgID(lua_tostring(L, -1));
+    const char* VersionIndependentProgID = lua_tostring(L, -1);
 
     // gets the registration information from the registration table
     lua_pushstring(L, "ProgID");
     lua_gettable(L, 1);
-    tStringBuffer ProgID(lua_tostring(L, -1));
+    const char* ProgID = lua_tostring(L, -1);
 
     lua_pushstring(L, "TypeLib");
     lua_gettable(L, 1);
-    tStringBuffer typelib_path(lua_tostring(L, -1));
+    const char* typelib_path = lua_tostring(L, -1);
 
     lua_pushstring(L, "CoClass");
     lua_gettable(L, 1);
-    tStringBuffer CoClass(lua_tostring(L, -1));
+    const char* CoClass = lua_tostring(L, -1);
 
     CHK_LCOM_ERR(VersionIndependentProgID && ProgID && typelib_path && CoClass,
       "Incomplete registration table.");
@@ -1418,8 +1411,8 @@ static int luacom_UnRegisterObject(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   // signals success
@@ -1441,42 +1434,28 @@ static int luacom_GetIUnknown(lua_State *L)
   // check parameters
   tLuaCOM* luacom = (tLuaCOM *) LuaBeans::check_tag(L, 1);
 
-  IUnknown* punk = NULL;
+  // Allocate a collectable, initially empty wrapper before QueryInterface
+  // acquires a reference. A Lua allocation error must not strand that reference.
+  luaCompat_pushTypeByName(L, MODULENAME, LCOM_IUNKNOWN_TYPENAME);
+  luaCompat_newTypedObject(L, NULL);
+  IUnknown** punk = static_cast<IUnknown**>(lua_touserdata(L, -1));
   HRESULT hr;
   try
   {
     tCOMPtr<IDispatch> pdisp(luacom->GetIDispatch());
-    hr = pdisp->QueryInterface(IID_IUnknown, (void **) &punk);
+    hr = pdisp->QueryInterface(IID_IUnknown, (void **) punk);
   }
   catch(tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
-  if(FAILED(hr) || punk == NULL)
+  if(FAILED(hr) || *punk == NULL)
   {
     if(SUCCEEDED(hr))
       hr = E_NOINTERFACE;
-    luacom_APIerror(L, tLuaCOMException::GetErrorMessage(hr));
-    return 0;
-  }
-
-  // checks whether there is a usertag for this IUnknown
-  // If exists, simply uses it
-
-  // gets IUnknown tag
-  luaCompat_pushTypeByName(L, MODULENAME, LCOM_IUNKNOWN_TYPENAME);
-
-  // sets object type
-  int newref = luaCompat_newTypedObject(L, punk);
-
-  if(!newref)
-  {
-    // there was already a userdata for that pointer, 
-    // so we have to decrement the reference count,
-    // as the garbage collector will be called just
-    // once for any userdata
-    punk->Release();
+    lua_pushstring(L, tLuaCOMException::GetErrorMessage(hr));
+    return -1;
   }
 
   return 1;
@@ -1511,9 +1490,8 @@ static int luacom_DumpTypeInfo(lua_State *L)
     }
     catch(class tLuaCOMException& e)
     {
-      luacom_APIerror(L, e.getMessage());
-
-      return 0;
+      lua_pushstring(L, e.getMessage());
+      return -1;
     }
   }
 
@@ -1567,8 +1545,8 @@ static int luacom_GetEnumerator(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   return retvals;
@@ -1604,8 +1582,8 @@ static int luacom_LoadTypeLibrary(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 }
 
@@ -1613,13 +1591,13 @@ static int luacom_LoadTypeLibrary(lua_State *L)
 /**
   Creates a luacom object using an IUnknown pointer.
 */
-int luacom_CreateLuaCOM(lua_State* L)
+static int luacom_CreateLuaCOMImpl(lua_State* L)
 {
   // checks whether to object on the stack is of this type
   if(!luaCompat_isOfType(L, MODULENAME, LCOM_IUNKNOWN_TYPENAME))
   {
-    luacom_APIerror(L, "IUnknown typed object expected.");
-    return 0;
+    lua_pushstring(L, "IUnknown typed object expected.");
+    return -1;
   }
 
   try
@@ -1637,19 +1615,24 @@ int luacom_CreateLuaCOM(lua_State* L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 }
 
-int luacom_StartMessageLoop(lua_State *L)
+int luacom_CreateLuaCOM(lua_State* L)
+{
+  return reportLuaCOMCall<luacom_CreateLuaCOMImpl, true>(L);
+}
+
+static int luacom_StartMessageLoopImpl(lua_State *L)
 {
   MSG msg;
   if(lua_gettop(L) > 0) {
     tStringBuffer err;
     if(luaCompat_call(L, lua_gettop(L)-1, 0, err)) {
-          luacom_APIerror(L, err);
-      return 0;
+      lua_pushstring(L, err ? (const char*)err : "Lua message-loop callback failed");
+      return -1;
     }
   }
   while (GetMessage(&msg, NULL, 0, 0))
@@ -1659,12 +1642,17 @@ int luacom_StartMessageLoop(lua_State *L)
     if(lua_gettop(L) > 0) {
       tStringBuffer err;
       if(luaCompat_call(L, lua_gettop(L)-1, 0, err)) {
-              luacom_APIerror(L, err);
-        return 0;
+        lua_pushstring(L, err ? (const char*)err : "Lua message-loop callback failed");
+        return -1;
       }
     }
   }
   return 0;
+}
+
+int luacom_StartMessageLoop(lua_State* L)
+{
+  return reportLuaCOMCall<luacom_StartMessageLoopImpl, true>(L);
 }
 
 
@@ -1679,7 +1667,8 @@ int luacom_LuaDetectAutomation(lua_State* L)
     // Running out-of-process
     lua_pushnumber(L,1);
     lua_gettable(L,-2);
-    tStringBuffer cmdSwitch(lua_tostring(L,-1));
+    // The switch is only inspected before any callback can run.
+    const char* cmdSwitch = lua_tostring(L,-1);
     lua_pop(L,2);
     if(cmdSwitch != NULL) {
       tStringBuffer errMsg;
@@ -1750,19 +1739,12 @@ int luacom_ImportIUnknown(lua_State* L)
     return 0;
   }
 
-  punk->AddRef();
-
   luaCompat_pushTypeByName(L, MODULENAME, LCOM_IUNKNOWN_TYPENAME);
   int newref = luaCompat_newTypedObject(L, (void*) punk);
 
-  if(!newref)
-  {
-    // there was already a userdata for that pointer, 
-    // so we have to decrement the reference count,
-    // as the garbage collector will be called just
-    // once for any userdata
-    punk->Release();
-  }
+  // The wrapper owns a reference only after its fallible Lua allocation.
+  if(newref)
+    punk->AddRef();
 
   return 1;
 }
@@ -1898,8 +1880,8 @@ static int tagmeth_settable(lua_State *L)
         // real value the field in the COM object. If the user really wishes
         // to redefine the field, he should use a lua function instead
 
-        luacom_error(L, "LuaCOM error: trying to set a read-only field in a COM object.");
-        return 0;
+        lua_pushliteral(L, "LuaCOM error: trying to set a read-only field in a COM object.");
+        return -1;
       }
       else if(found)
       {
@@ -1932,8 +1914,8 @@ static int tagmeth_settable(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_error(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   return 0;
@@ -1977,8 +1959,8 @@ static int callhook(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_error(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 }
 
@@ -2070,7 +2052,7 @@ static int untyped_tagmeth_index(lua_State *L,
         lua_pushnumber(L, INVOKE_PROPERTYGET);
         lua_pushnumber(L, 0); // no funcdesc
 
-        lua_pushcclosure(L, callhook, 4);
+        lua_pushcclosure(L, (reportLuaCOMCall<callhook, false>), 4);
         return 1;
       }
       
@@ -2082,7 +2064,7 @@ static int untyped_tagmeth_index(lua_State *L,
         lua_pushnumber(L, INVOKE_PROPERTYPUT);
         lua_pushnumber(L, 0); // no funcdesc
 
-        lua_pushcclosure(L, callhook, 4);
+        lua_pushcclosure(L, (reportLuaCOMCall<callhook, false>), 4);
         return 1;
       }
 
@@ -2094,7 +2076,7 @@ static int untyped_tagmeth_index(lua_State *L,
         lua_pushnumber(L, INVOKE_PROPERTYGET | INVOKE_FUNC);
         lua_pushnumber(L, 0); // no funcdesc
 
-        lua_pushcclosure(L, callhook, 4);
+        lua_pushcclosure(L, (reportLuaCOMCall<callhook, false>), 4);
         return 1;
       }
     }
@@ -2209,7 +2191,7 @@ static int typed_tagmeth_index(lua_State *L,
         lua_pushnumber(L, INVOKE_PROPERTYGET);
         lua_pushlightuserdata(L, (void *) funcinfo.propget);
 
-        lua_pushcclosure(L, callhook, 4);
+        lua_pushcclosure(L, (reportLuaCOMCall<callhook, false>), 4);
         return 1;
       }
     }
@@ -2225,7 +2207,7 @@ static int typed_tagmeth_index(lua_State *L,
         lua_pushnumber(L, funcinfo.propput->invkind);
         lua_pushlightuserdata(L, (void *) funcinfo.propput);
 
-        lua_pushcclosure(L, callhook, 4);
+        lua_pushcclosure(L, (reportLuaCOMCall<callhook, false>), 4);
         return 1;
       }
     }
@@ -2238,7 +2220,7 @@ static int typed_tagmeth_index(lua_State *L,
       lua_pushnumber(L, INVOKE_FUNC);
       lua_pushlightuserdata(L, (void *) funcinfo.func);
 
-      lua_pushcclosure(L, callhook, 4);
+      lua_pushcclosure(L, (reportLuaCOMCall<callhook, false>), 4);
       return 1;
     }
 
@@ -2303,8 +2285,8 @@ static int tagmeth_index(lua_State *L)
     case tLuaCOMException::PARAMETER_OUT_OF_RANGE:
     case tLuaCOMException::UNSUPPORTED_FEATURE:
     default:
-      luacom_error(L, e.getMessage());
-      return 0;
+      lua_pushstring(L, e.getMessage());
+      return -1;
       break;
     }
 
@@ -2361,8 +2343,8 @@ static int call_event(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_error(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
 
   return retval;
@@ -2519,8 +2501,8 @@ static int luacom_ReleaseComObject(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_APIerror(L, e.getMessage());
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    return -1;
   }
   return 0;
 }
@@ -2534,30 +2516,30 @@ static int luacom_ReleaseComObject(lua_State *L)
 
 static struct luaL_Reg functions_tb []= 
 {
-  {"CreateObject",luacom_CreateObject},
-  {"GetObject",luacom_GetObject},
-  {"CLSIDfromProgID",luacom_CLSIDfromProgID},
-  {"ImplInterface",luacom_ImplInterface},
-  {"ImplInterfaceFromTypelib",luacom_ImplInterfaceFromTypelib},
-  {"addConnection", luacom_addConnection},
-  {"releaseConnection", luacom_releaseConnection},
-  {"ProgIDfromCLSID",luacom_ProgIDfromCLSID},
+  {"CreateObject",reportLuaCOMCall<luacom_CreateObject, true>},
+  {"GetObject",reportLuaCOMCall<luacom_GetObject, true>},
+  {"CLSIDfromProgID",reportLuaCOMCall<luacom_CLSIDfromProgID, true>},
+  {"ImplInterface",reportLuaCOMCall<luacom_ImplInterface, true>},
+  {"ImplInterfaceFromTypelib",reportLuaCOMCall<luacom_ImplInterfaceFromTypelib, true>},
+  {"addConnection", reportLuaCOMCall<luacom_addConnection, true>},
+  {"releaseConnection", reportLuaCOMCall<luacom_releaseConnection, true>},
+  {"ProgIDfromCLSID",reportLuaCOMCall<luacom_ProgIDfromCLSID, true>},
   {"isMember",luacom_isMember},
-  {"Connect",luacom_Connect},
-  {"ShowHelp",luacom_ShowHelp},
-  {"NewObject", luacom_NewObject},
-  {"NewControl", luacom_NewControl},
-  {"ExposeObject", luacom_ExposeObject},
-  {"RevokeObject", luacom_RevokeObject},
-  {"RegisterObject", luacom_RegisterObject},
-  {"UnRegisterObject", luacom_UnRegisterObject},
-  {"GetIUnknown", luacom_GetIUnknown},
+  {"Connect",reportLuaCOMCall<luacom_Connect, true>},
+  {"ShowHelp",reportLuaCOMCall<luacom_ShowHelp, true>},
+  {"NewObject", reportLuaCOMCall<luacom_NewObject, true>},
+  {"NewControl", reportLuaCOMCall<luacom_NewControl, true>},
+  {"ExposeObject", reportLuaCOMCall<luacom_ExposeObject, true>},
+  {"RevokeObject", reportLuaCOMCall<luacom_RevokeObject, true>},
+  {"RegisterObject", reportLuaCOMCall<luacom_RegisterObject, true>},
+  {"UnRegisterObject", reportLuaCOMCall<luacom_UnRegisterObject, true>},
+  {"GetIUnknown", reportLuaCOMCall<luacom_GetIUnknown, true>},
   {"StartLog", luacom_StartLog},
   {"EndLog", luacom_EndLog},
-  {"DumpTypeInfo", luacom_DumpTypeInfo},
+  {"DumpTypeInfo", reportLuaCOMCall<luacom_DumpTypeInfo, true>},
   {"GetTypeInfo", luacom_GetTypeInfo},
-  {"GetEnumerator", luacom_GetEnumerator},
-  {"LoadTypeLibrary", luacom_LoadTypeLibrary},
+  {"GetEnumerator", reportLuaCOMCall<luacom_GetEnumerator, true>},
+  {"LoadTypeLibrary", reportLuaCOMCall<luacom_LoadTypeLibrary, true>},
   {"CreateLuaCOM", luacom_CreateLuaCOM},
   {"ImportIUnknown", luacom_ImportIUnknown},
   {"GetCurrentDirectory", luacom_GetCurrentDirectory},
@@ -2566,7 +2548,7 @@ static struct luaL_Reg functions_tb []=
   {"RoundTrip", luacom_RoundTrip},
   {"GetCodepage", luacom_GetCodepage},	// -hg 24.9.2015
   {"SetCodepage", luacom_SetCodepage},
-  {"ReleaseComObject", luacom_ReleaseComObject}, //hg 06.09.2022
+  {"ReleaseComObject", reportLuaCOMCall<luacom_ReleaseComObject, true>}, //hg 06.09.2022
   {NULL, NULL}
 };
   
@@ -2646,9 +2628,9 @@ LUACOM_API void luacom_open(lua_State *L)
   {
     LuaBeans::Events obj_events, pointer_events;
 
-    obj_events.index = tagmeth_index;
-    obj_events.settable = tagmeth_settable;
-    obj_events.call = call_event;
+    obj_events.index = reportLuaCOMCall<tagmeth_index, false>;
+    obj_events.settable = reportLuaCOMCall<tagmeth_settable, false>;
+    obj_events.call = reportLuaCOMCall<call_event, false>;
     pointer_events.gc = tagmeth_gc;
 
     LuaBeans::registerObjectEvents(L, obj_events);

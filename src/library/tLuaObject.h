@@ -30,6 +30,9 @@ typedef enum
 class tLuaObject
 {
 public:
+  // Lua's finalizer deletes through tLuaObject*, including derived COM owners.
+  virtual ~tLuaObject() {}
+
   static void cacheObject(lua_State* L, void* pointer);
   static bool pushCachedObject(lua_State* L, void* pointer);
 

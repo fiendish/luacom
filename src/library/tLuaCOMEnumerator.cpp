@@ -5,6 +5,7 @@
 #include "tLuaCOMEnumerator.h"
 #include <math.h>
 #include <limits.h>
+#include <exception>
 
 #include "tUtil.h"
 #include "tCOMUtil.h"
@@ -172,22 +173,64 @@ int tLuaCOMEnumerator::call_method(lua_State *L)
     (tLuaCOMEnumerator*)*(void **)lua_touserdata(L, enumerator_param);
 
   // gets the method name
-  tStringBuffer method_name(lua_tostring(L, method_param));
+  const char* method_name = lua_tostring(L, method_param);
 
   // call method
   int retval = 0;
+  bool failed = false;
   try
   {
     retval = enumerator->callCOMmethod(L, method_name, user_first_param, num_params);
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_error(L, e.getMessage());
-
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    failed = true;
   }
 
+  // Destroy the exception and its formatted temporary before Lua can longjmp.
+  if(failed)
+  {
+    luacom_error(L, lua_tostring(L, -1));
+    return 0;
+  }
   return retval;
+}
+
+struct tLuaCOMEnumerator::NextContext
+{
+  explicit NextContext(tLuaCOMTypeHandler* handler)
+    : handler(handler), values(NULL), count(0), fetched(0) {}
+  ~NextContext()
+  {
+    for(ULONG i = 0; i < count; i++)
+      handler->releaseVariant(&values[i]);
+    delete[] values;
+  }
+  tLuaCOMTypeHandler* handler;
+  VARIANT* values;
+  ULONG count, fetched;
+  std::exception_ptr exception;
+};
+
+int tLuaCOMEnumerator::protectedNext(lua_State* L)
+{
+  NextContext* context = static_cast<NextContext*>(
+    lua_touserdata(L, lua_upvalueindex(1)));
+  try
+  {
+    if(context->fetched > INT_MAX ||
+       !lua_checkstack(L, static_cast<int>(context->fetched)))
+      return luaL_error(L, "Insufficient Lua stack space for enumeration results");
+    for(ULONG i = 0; i < context->fetched; i++)
+      context->handler->com2lua(L, context->values[i]);
+    return static_cast<int>(context->fetched);
+  }
+  catch(...)
+  {
+    context->exception = std::current_exception();
+    return 0;
+  }
 }
 
 int tLuaCOMEnumerator::callCOMmethod(lua_State* L, const char *name, int first_param, int num_params)
@@ -210,55 +253,46 @@ int tLuaCOMEnumerator::callCOMmethod(lua_State* L, const char *name, int first_p
     if(num_elements == 0)
       return 0;
 
-    VARIANT* pVar = NULL;
-    try
-    {
-      pVar = new VARIANT[num_elements];
-    }
-    catch (...)
-    {
+    const int top = lua_gettop(L);
+    if(!lua_checkstack(L, 2))
       LUACOM_EXCEPTION(MALLOC_ERROR);
-    }
 
-    for(unsigned long counter = 0; counter <  num_elements; counter++)
-      VariantInit(&pVar[counter]);
-
-    ULONG fetched = 0;
-    hr = pEV->Next(num_elements, pVar, &fetched);
-    if(fetched > num_elements)
+    int status;
+    std::exception_ptr exception;
     {
-      for(unsigned long counter = 0; counter < num_elements; counter++)
-        VariantClear(&pVar[counter]);
-      delete[] pVar;
-      LUACOM_EXCEPTION(INTERNAL_ERROR);
-    }
+      NextContext context(typehandler);
+      // Prepare the protected worker before acquiring the result array.
+      lua_pushlightuserdata(L, &context);
+      lua_pushcclosure(L, protectedNext, 1);
+      try
+      {
+        context.values = new VARIANT[num_elements];
+      }
+      catch(const std::bad_alloc&)
+      {
+        LUACOM_EXCEPTION(MALLOC_ERROR);
+      }
+      for(ULONG i = 0; i < num_elements; i++)
+        VariantInit(&context.values[i]);
+      context.count = num_elements;
 
-    try
-    {
-      if(FAILED(hr))
+      hr = pEV->Next(num_elements, context.values, &context.fetched);
+      if(context.fetched > num_elements)
+        LUACOM_EXCEPTION(INTERNAL_ERROR);
+      if(FAILED(hr)) // S_FALSE is a successful partial/end-of-enumeration result.
         CHK_COM_CODE(hr);
 
-      for(unsigned long counter = 0; counter < fetched; counter++)
-      {
-        typehandler->com2lua(L, pVar[counter]);
-        typehandler->releaseVariant(&pVar[counter]);
-      }
+      status = lua_pcall(L, 0, LUA_MULTRET, 0);
+      exception = context.exception;
     }
-    catch (...)
+    if(exception)
     {
-      for(unsigned long counter = 0; counter < num_elements; counter++)
-        VariantClear(&pVar[counter]);
-      delete[] pVar;
-      throw;
+      lua_settop(L, top);
+      std::rethrow_exception(exception);
     }
-
-    for(unsigned long counter = 0; counter < num_elements; counter++)
-      VariantClear(&pVar[counter]);
-    delete[] pVar;
-
-    pVar = NULL;
-
-    return fetched;
+    if(status != 0)
+      return lua_error(L);
+    return lua_gettop(L) - top;
   }
 
   if(strcmp(name, "Reset") == 0)
