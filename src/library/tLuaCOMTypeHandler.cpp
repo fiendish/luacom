@@ -490,7 +490,12 @@ int tLuaCOMTypeHandler::protectedCom2Lua(lua_State* L)
     context->handler->com2luaImpl(L, *context);
     return 1;
   }
-  catch(...)
+  catch(const tLuaCOMException&)
+  {
+    context->exception = std::current_exception();
+    return 0;
+  }
+  catch(const std::exception&)
   {
     context->exception = std::current_exception();
     return 0;

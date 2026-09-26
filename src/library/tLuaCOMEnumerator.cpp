@@ -217,16 +217,21 @@ int tLuaCOMEnumerator::protectedNext(lua_State* L)
 {
   NextContext* context = static_cast<NextContext*>(
     lua_touserdata(L, lua_upvalueindex(1)));
+  if(context->fetched > INT_MAX ||
+     !lua_checkstack(L, static_cast<int>(context->fetched)))
+    return luaL_error(L, "Insufficient Lua stack space for enumeration results");
   try
   {
-    if(context->fetched > INT_MAX ||
-       !lua_checkstack(L, static_cast<int>(context->fetched)))
-      return luaL_error(L, "Insufficient Lua stack space for enumeration results");
     for(ULONG i = 0; i < context->fetched; i++)
       context->handler->com2lua(L, context->values[i]);
     return static_cast<int>(context->fetched);
   }
-  catch(...)
+  catch(const tLuaCOMException&)
+  {
+    context->exception = std::current_exception();
+    return 0;
+  }
+  catch(const std::exception&)
   {
     context->exception = std::current_exception();
     return 0;
