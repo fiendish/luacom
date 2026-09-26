@@ -65,6 +65,10 @@ public:
     TYPEDESC tdesc);
 
 protected:
+  struct ConversionContext;
+  static int protectedCom2Lua(lua_State* L);
+  void com2luaImpl(lua_State* L, ConversionContext& context);
+
   long * dimensionsFromBounds(SAFEARRAYBOUND* bounds, long num_bounds);
   void put_in_array(SAFEARRAY* safearray,
                     VARIANT var_value,
@@ -101,9 +105,10 @@ protected:
     lua_State* L, 
     SAFEARRAY* safearray,
     long *indices,
-    const VARTYPE& vt);
+    const VARTYPE& vt,
+    VARIANTARG& value);
 
-  void safearray_com2lua(lua_State* L, VARIANTARG& varg);
+  void safearray_com2lua(lua_State* L, VARIANTARG& varg, ConversionContext& context);
 
   void safearray_lua2com(
     lua_State* L,
@@ -113,7 +118,7 @@ protected:
     );
 
   void string2safearray(const char* str, size_t len, VARIANTARG& varg);
-  void safearray2string(lua_State* L, VARIANTARG & varg);
+  void safearray2string(lua_State* L, VARIANTARG & varg, ConversionContext& context);
 
   tCOMPtr<ITypeInfo> m_typeinfo;
 };

@@ -207,6 +207,7 @@ int tLuaObject::closure(lua_State *L)
   }
 
   int retval = 0;
+  bool failed = false;
 
   try
   {
@@ -214,10 +215,13 @@ int tLuaObject::closure(lua_State *L)
   }
   catch(class tLuaCOMException& e)
   {
-    luacom_error(L, e.getMessage());
-
-    return 0;
+    lua_pushstring(L, e.getMessage());
+    failed = true;
   }
+
+  // Lua error reporting may longjmp; let the native exception die first.
+  if(failed)
+    luacom_error(L, lua_tostring(L, -1));
 
   return retval;
 }
