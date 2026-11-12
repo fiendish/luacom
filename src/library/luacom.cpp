@@ -1249,6 +1249,9 @@ static int luacom_RegisterObject(lua_State *L)
         CLSID,
         "ScriptFile",
         scriptFile);
+    } else if(inprocServer == NULL) {
+      luacom_DelRegKey((strCLSID + "\\InprocServer32").c_str());
+      luacom_DelRegKey((strCLSID + "\\ScriptFile").c_str());
     }
 
     if(control) {
