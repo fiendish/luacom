@@ -15,7 +15,13 @@ if ($Version -eq 'LuaJIT') {
     $source = Join-Path $Destination "LuaJIT-$revision/src"
 } else {
     # Release checksums are published at https://www.lua.org/ftp/.
-    Invoke-WebRequest "https://www.lua.org/ftp/lua-$Version.tar.gz" -OutFile $archive
+    $release = "lua-$Version.tar.gz"
+    try {
+        Invoke-WebRequest "https://www.lua.org/ftp/$release" -OutFile $archive
+    } catch {
+        Write-Warning "Download of $release from www.lua.org failed: $_. Trying the NetBSD mirror."
+        Invoke-WebRequest "https://cdn.netbsd.org/pub/pkgsrc/distfiles/$release" -OutFile $archive
+    }
     if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $Sha256) {
         throw "SHA256 mismatch for Lua $Version"
     }
