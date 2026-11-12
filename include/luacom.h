@@ -24,6 +24,11 @@ extern "C"
 #endif
 
 LUACOM_API void luacom_open(lua_State *L);
+/* Register the native API without loading the Lua helpers. Pass NULL for
+   inprocServer to register local servers only. Pass NULL for startMessageLoop
+   to use the standard Windows message loop. */
+LUACOM_API void luacom_open_core(lua_State *L, const char* inprocServer,
+                                 lua_CFunction startMessageLoop);
 LUACOM_API void luacom_close(lua_State *L);
 
 LUACOM_API int luacom_IDispatch2LuaCOM(lua_State *L, void *pdisp_arg);

@@ -33,7 +33,8 @@ tCOMUtil::~tCOMUtil()
 
 ITypeInfo *tCOMUtil::GetCoClassTypeInfo(CLSID clsid)
 {
-  ITypeLib* typelib = tCOMUtil::LoadTypeLibFromCLSID(clsid);
+  tCOMPtr<ITypeLib> typelib;
+  typelib.Attach(tCOMUtil::LoadTypeLibFromCLSID(clsid));
 
   if(typelib == NULL)
     return NULL;

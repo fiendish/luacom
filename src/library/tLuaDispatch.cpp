@@ -17,12 +17,6 @@ namespace
 {
 // Implementation-table metamethods run under Lua protection. Translate their
 // failures to C++ exceptions so Invoke restores its stack and COM callers unwind.
-int protectedMemberGet(lua_State* L)
-{
-  lua_gettable(L, 1);
-  return 1;
-}
-
 int protectedMemberSet(lua_State* L)
 {
   lua_settable(L, 1);
@@ -42,7 +36,7 @@ void getMember(lua_State* L)
   const int table = lua_gettop(L) - 1;
   if(!lua_checkstack(L, 3))
     COM_EXCEPTION("Insufficient Lua stack space for member lookup");
-  lua_pushcfunction(L, protectedMemberGet);
+  lua_pushcfunction(L, LuaAux::getTableValue);
   lua_pushvalue(L, table);
   lua_pushvalue(L, table + 1);
   callMemberAccess(L, 2, 1);

@@ -2,6 +2,7 @@ EXPORTS
 	luaopen_luacom
 	luacom_openlib
 	luacom_open
+	luacom_open_core
 	luacom_close
 	luacom_IDispatch2LuaCOM
 	luacom_detectAutomation

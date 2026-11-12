@@ -7,7 +7,51 @@
 
 #include <windows.h>
 #include <oleauto.h>
+#include <vector>
 #include "tStringBuffer.h"
+
+// The ITypeInfo that supplied the attributes must outlive this holder.
+class tTypeAttrHolder
+{
+public:
+  explicit tTypeAttrHolder(ITypeInfo *owner) : m_owner(owner), m_value(NULL) {}
+  ~tTypeAttrHolder() { if(m_value) m_owner->ReleaseTypeAttr(m_value); }
+  TYPEATTR **out() { return &m_value; }
+  TYPEATTR *get() const { return m_value; }
+
+private:
+  tTypeAttrHolder(const tTypeAttrHolder&) = delete;
+  tTypeAttrHolder& operator=(const tTypeAttrHolder&) = delete;
+  ITypeInfo *m_owner;
+  TYPEATTR *m_value;
+};
+
+// GetNames and GetFieldNames can fill only part of the caller's array.
+class tBstrArray
+{
+public:
+  explicit tBstrArray(size_t count = 0) : m_values(count) {}
+  ~tBstrArray()
+  {
+    for(BSTR value : m_values)
+      SysFreeString(value);
+  }
+
+  BSTR *data() { return m_values.data(); }
+  BSTR operator[](size_t index) const { return m_values[index]; }
+
+  void resize(size_t count)
+  {
+    for(size_t i = count; i < m_values.size(); ++i)
+      SysFreeString(m_values[i]);
+    m_values.resize(count);
+  }
+
+private:
+  tBstrArray(const tBstrArray&) = delete;
+  tBstrArray& operator=(const tBstrArray&) = delete;
+  std::vector<BSTR> m_values;
+};
 
 class tCOMUtil  
 {
@@ -73,7 +117,17 @@ public:
   tCOMPtr() : m_p(NULL) { }
   tCOMPtr(const tCOMPtr & o) : m_p(o.m_p) { AddRef();};
   tCOMPtr(T * p) : m_p(p) { AddRef();};
-  void operator=(const  tCOMPtr<T> & o) { Attach(o.m_p); AddRef(); }
+  void operator=(const tCOMPtr<T> & o)
+    {
+    if (m_p == o.m_p)
+      return;
+    T * p = o.m_p;
+    if (p)
+      p->AddRef();
+    if (m_p)
+      m_p->Release();
+    m_p = p;
+    }
   ~tCOMPtr() { if (m_p) m_p->Release(); }
   operator T* () const { return m_p; }
   T& operator * () const { return *m_p; }

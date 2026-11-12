@@ -14,15 +14,6 @@
 
 #define LUA_NOOBJECT 0
 
-// Table/userdata indexing can invoke a Lua metamethod. Protect that call so a
-// Lua longjmp cannot bypass the vector's C++ allocation cleanup.
-static int getVectorElement(lua_State* L)
-{
-  lua_gettable(L, 1);
-  return 1;
-}
-
-
 //////////////////////////////////////////////////////////////////////
 // Construction/Destruction
 //////////////////////////////////////////////////////////////////////
@@ -348,7 +339,7 @@ void tLuaVector::InitVectorFromTable(lua_State* L, stkIndex table)
         TYPECONV_ERROR("Insufficient Lua stack space for safearray");
 
       lua_pushvalue(L, table);
-      lua_pushcfunction(L, getVectorElement);
+      lua_pushcfunction(L, LuaAux::getTableValue);
       lua_insert(L, -2);
       lua_pushnumber(L, length + 1);
 
