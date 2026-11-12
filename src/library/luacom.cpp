@@ -1103,6 +1103,8 @@ static int luacom_RegisterObject(lua_State *L)
     lua_pushstring(L, "ScriptFile");
     lua_gettable(L, 1);
     const char* scriptFile = lua_tostring(L, -1);
+    lua_pushvalue(L, lua_upvalueindex(1));
+    const char* inprocServer = lua_tostring(L, -1);
 
     CHK_LCOM_ERR(VersionIndependentProgID && ProgID && typelib_path && CoClass,
       "Incomplete registration table.");
@@ -1238,15 +1240,18 @@ static int luacom_RegisterObject(lua_State *L)
       "LocalServer32",
       ModulePath);
 
-    if(scriptFile) {
+    if(scriptFile && inprocServer) {
       luacom_SetRegKeyValue(
         CLSID,
         "InprocServer32",
-        LUACOM_DLL);
-    luacom_SetRegKeyValue(
-      CLSID,
-      "ScriptFile",
-      scriptFile);
+        inprocServer);
+      luacom_SetRegKeyValue(
+        CLSID,
+        "ScriptFile",
+        scriptFile);
+    } else if(inprocServer == NULL) {
+      luacom_DelRegKey((strCLSID + "\\InprocServer32").c_str());
+      luacom_DelRegKey((strCLSID + "\\ScriptFile").c_str());
     }
 
     if(control) {
@@ -1661,68 +1666,51 @@ int luacom_StartMessageLoop(lua_State* L)
 */
 int luacom_LuaDetectAutomation(lua_State* L)
 {
-  lua_getglobal(L,"arg");
-  if(lua_istable(L,-1))
+  lua_getglobal(L, "arg");
+  if(!lua_istable(L, -1)) {
+    lua_pop(L, 1);
+    return 1;  // Running in-process.
+  }
+
+  lua_pushinteger(L, 1);
+  lua_gettable(L, -2);
+  const char* cmdSwitch = lua_tostring(L, -1);
+  const char* method = NULL;
+  bool automation = false;
+  if(cmdSwitch) {
+    if(_stricmp("/Register", cmdSwitch) == 0)
+      method = "Register";
+    else if(_stricmp("/UnRegister", cmdSwitch) == 0)
+      method = "UnRegister";
+    else if(_stricmp("/Automation", cmdSwitch) == 0) {
+      method = "StartAutomation";
+      automation = true;
+    }
+  }
+  lua_pop(L, 2);
+  if(!method) {
+    lua_pushnil(L);
+    lua_pushliteral(L, "no valid command-line switch");
+    return 2;
+  }
+
+  lua_getfield(L, -1, method);
+  lua_pushvalue(L, -2);
   {
-    // Running out-of-process
-    lua_pushnumber(L,1);
-    lua_gettable(L,-2);
-    // The switch is only inspected before any callback can run.
-    const char* cmdSwitch = lua_tostring(L,-1);
-    lua_pop(L,2);
-    if(cmdSwitch != NULL) {
-      tStringBuffer errMsg;
-      if(_stricmp("/Register",cmdSwitch) == 0) {
-        lua_pushstring(L,"Register");
-        lua_gettable(L,-2);
-        lua_pushvalue(L,-2);
-        if(luaCompat_call(L,1,0,errMsg)) {
-          lua_pushnil(L);
-          lua_pushstring(L,errMsg);
-          return 2;
-        } else {
-          return 1;
-        }
-      } else if(_stricmp("/UnRegister",cmdSwitch) == 0) {
-        lua_pushstring(L,"UnRegister");
-        lua_gettable(L,-2);
-        lua_pushvalue(L,-2);
-        if(luaCompat_call(L,1,0,errMsg)) {
-          lua_pushnil(L);
-          lua_pushstring(L,errMsg);
-          return 2;
-        } else {
-          return 1;
-        }
-      } else if(_stricmp("/Automation",cmdSwitch) == 0) {
-        lua_pushstring(L,"StartAutomation");
-        lua_gettable(L,-2);
-        lua_pushvalue(L,-2);
-        if(luaCompat_call(L,1,0,errMsg)) {
-          lua_pushnil(L);
-          lua_pushstring(L,errMsg);
-          return 2;
-        } else {
-          lua_settop(L, 0);
-          luacom_StartMessageLoop(L);
-          return 0;
-        }
-      }
+    tStringBuffer errMsg;
+    if(luaCompat_call(L, 1, 0, errMsg)) {
       lua_pushnil(L);
-      lua_pushstring(L,"no valid command-line switch");
-      return 2;
-    } else {
-      lua_pushnil(L);
-      lua_pushstring(L,"no valid command-line switch");
+      lua_pushstring(L, errMsg);
       return 2;
     }
   }
-  else
-  {
-    // Running in-process
-    lua_pop(L,1);
-    return 1;
+  if(automation) {
+    lua_settop(L, 0);
+    lua_pushvalue(L, lua_upvalueindex(1));  // The same loop as StartMessageLoop.
+    lua_call(L, 0, 0);
+    return 0;
   }
+  return 1;
 }
 
 
@@ -2531,7 +2519,6 @@ static struct luaL_Reg functions_tb []=
   {"NewControl", reportLuaCOMCall<luacom_NewControl, true>},
   {"ExposeObject", reportLuaCOMCall<luacom_ExposeObject, true>},
   {"RevokeObject", reportLuaCOMCall<luacom_RevokeObject, true>},
-  {"RegisterObject", reportLuaCOMCall<luacom_RegisterObject, true>},
   {"UnRegisterObject", reportLuaCOMCall<luacom_UnRegisterObject, true>},
   {"GetIUnknown", reportLuaCOMCall<luacom_GetIUnknown, true>},
   {"StartLog", luacom_StartLog},
@@ -2543,8 +2530,6 @@ static struct luaL_Reg functions_tb []=
   {"CreateLuaCOM", luacom_CreateLuaCOM},
   {"ImportIUnknown", luacom_ImportIUnknown},
   {"GetCurrentDirectory", luacom_GetCurrentDirectory},
-  {"DetectAutomation", luacom_LuaDetectAutomation},
-  {"StartMessageLoop", luacom_StartMessageLoop},
   {"RoundTrip", luacom_RoundTrip},
   {"GetCodepage", luacom_GetCodepage},	// -hg 24.9.2015
   {"SetCodepage", luacom_SetCodepage},
@@ -2596,7 +2581,8 @@ LUACOM_API int luacom_IDispatch2LuaCOM(lua_State *L, void *pdisp_arg)
 /*
  * Initializes the library.
  */
-LUACOM_API void luacom_open(lua_State *L)
+LUACOM_API void luacom_open_core(lua_State *L, const char* inprocServer,
+                                 lua_CFunction startMessageLoop)
 {
   if(L == NULL)
     return;
@@ -2605,6 +2591,16 @@ LUACOM_API void luacom_open(lua_State *L)
 
   // creates LuaCOM library table
   luaL_register(L, LIBNAME, functions_tb);
+
+  lua_pushstring(L, inprocServer);  // NULL means local server registration only.
+  lua_pushcclosure(L, (reportLuaCOMCall<luacom_RegisterObject, true>), 1);
+  lua_setfield(L, -2, "RegisterObject");
+
+  lua_pushcfunction(L, startMessageLoop ? startMessageLoop : luacom_StartMessageLoop);
+  lua_pushvalue(L, -1);
+  lua_setfield(L, -3, "StartMessageLoop");
+  lua_pushcclosure(L, luacom_LuaDetectAutomation, 1);
+  lua_setfield(L, -2, "DetectAutomation");
 
   // sets version
   lua_pushstring(L, "_VERSION");
@@ -2675,30 +2671,36 @@ LUACOM_API void luacom_open(lua_State *L)
   lua_pushboolean(L, 0);
   luaCompat_moduleSet(L, MODULENAME, LUACOM_SHOULD_ABORT_API);
 
-  // loadls the lua code that implements the remaining
-  // features of LuaCOM
-  int status = 0;
-#ifdef LUA_DEBUGGING
-  status = luaL_dofile(L, "luacom5.lua");
-#else
-  #include "luacom.loh"
-  status = luaL_loadbuffer(L, (const char*)luacom5_source_bytes,
-			   luacom5_source_size, "@luacom5.lua");
-  if (status == 0) {
-    status = lua_pcall(L, 0, 0, 0);
-  }
-#endif
-  if (status != 0) {
-    const char* msg = lua_tostring(L, -1);
-    fprintf(stderr, "luacom.dll error: %s\n", msg ? msg : "unknown");
-    lua_error(L);
-  }
-
   idxDispatch = (void*)&luacom_runningInprocess;
 
   LUASTACK_CLEAN(L, 0);
 }
 
+
+// Builds that supply a COM server DLL name use the standard module loader.
+#ifdef LUACOM_DLL
+LUACOM_API void luacom_open(lua_State *L)
+{
+  if(!L)
+    return;
+  luacom_open_core(L, LUACOM_DLL, NULL);
+
+#ifdef LUA_DEBUGGING
+  int status = luaL_loadfile(L, "luacom5.lua");
+#else
+  #include "luacom.loh"
+  int status = luaL_loadbuffer(L, (const char*)luacom5_source_bytes,
+                               luacom5_source_size, "@luacom5.lua");
+#endif
+  if (status == 0)
+    status = lua_pcall(L, 0, 0, 0);
+  if (status != 0) {
+    const char* msg = lua_tostring(L, -1);
+    fprintf(stderr, "luacom.dll error: %s\n", msg ? msg : "unknown");
+    lua_error(L);
+  }
+}
+#endif
 
 /**
  Closes the library.

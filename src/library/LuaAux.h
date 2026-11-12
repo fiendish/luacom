@@ -16,6 +16,7 @@ typedef int stkIndex;
 class LuaAux  
 {
 public:
+  static int getTableValue(lua_State *L);
   static void printLuaTable(lua_State *L, stkIndex index);
   static void printLuaStack(lua_State *L);
   static void printPreDump(int expected);

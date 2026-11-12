@@ -48,18 +48,6 @@ private:
   VARDESC * m_value;
 };
 
-class tTypeAttrHolder
-{
-public:
-  tTypeAttrHolder(ITypeInfo * typeinfo, TYPEATTR * value)
-    : m_typeinfo(typeinfo), m_value(value) {}
-  ~tTypeAttrHolder()
-    { if(m_value) m_typeinfo->ReleaseTypeAttr(m_value); }
-private:
-  ITypeInfo * m_typeinfo;
-  TYPEATTR * m_value;
-};
-
 class tBstrHolder
 {
 public:
@@ -71,27 +59,7 @@ private:
   BSTR m_value;
 };
 
-class tBstrArrayHolder
-{
-public:
-  explicit tBstrArrayHolder(UINT count)
-    : m_values(new BSTR[count]), m_count(count)
-  {
-    for(UINT i = 0; i < m_count; ++i)
-      m_values[i] = NULL;
-  }
-  ~tBstrArrayHolder()
-  {
-    for(UINT i = 0; i < m_count; ++i)
-      SysFreeString(m_values[i]);
-    delete[] m_values;
-  }
-  BSTR * data() { return m_values; }
-  BSTR operator[](UINT index) const { return m_values[index]; }
-private:
-  BSTR * m_values;
-  UINT m_count;
-};
+
 }
 
 const char tLuaTLB::type_name[] = "ITypeLib";
@@ -249,10 +217,10 @@ int tLuaTLB::ExportConstants(tLuaObject* lua_obj, lua_State* L)
       tLuaCOMTypeHandler typehandler(ptypeinfo);
 
       // get var_count
-      TYPEATTR* ptypeattr = NULL;
-      hr = ptypeinfo->GetTypeAttr(&ptypeattr);
-      tTypeAttrHolder typeattr_holder(ptypeinfo, ptypeattr);
+      tTypeAttrHolder attributes(ptypeinfo);
+      hr = ptypeinfo->GetTypeAttr(attributes.out());
       CHK_COM_CODE(hr);
+      TYPEATTR *ptypeattr = attributes.get();
       CHK_LCOM_ERR(ptypeattr, "Type attributes are unavailable.");
       long var_count = ptypeattr->cVars;
 
@@ -313,10 +281,10 @@ int tLuaTLB::ExportEnumerations(tLuaObject* lua_obj, lua_State* L)
 
       tLuaCOMTypeHandler typehandler(ptypeinfo);
 
-      TYPEATTR* ptypeattr = NULL;
-      HRESULT hr = ptypeinfo->GetTypeAttr(&ptypeattr);
-      tTypeAttrHolder typeattr_holder(ptypeinfo, ptypeattr);
+      tTypeAttrHolder attributes(ptypeinfo);
+      HRESULT hr = ptypeinfo->GetTypeAttr(attributes.out());
       CHK_COM_CODE(hr);
+      TYPEATTR *ptypeattr = attributes.get();
       CHK_LCOM_ERR(ptypeattr, "Type attributes are unavailable.");
 
       long var_count = ptypeattr->cVars;
@@ -420,10 +388,10 @@ int tLuaTypeInfo::GetFuncDesc(tLuaObject* lua_obj, lua_State* L)
   // we just deal with oleautomation-compatible interfaces
   unsigned short flags = 0 ;
   {
-    TYPEATTR* ptypeattr = NULL;
-    hr = lua_typeinfo->typeinfo->GetTypeAttr(&ptypeattr);
-    tTypeAttrHolder typeattr_holder(lua_typeinfo->typeinfo, ptypeattr);
+    tTypeAttrHolder attributes(lua_typeinfo->typeinfo);
+    hr = lua_typeinfo->typeinfo->GetTypeAttr(attributes.out());
     CHK_COM_CODE(hr);
+    TYPEATTR *ptypeattr = attributes.get();
     CHK_LCOM_ERR(ptypeattr, "Type attributes are unavailable.");
 
     flags = ptypeattr->wTypeFlags;
@@ -468,7 +436,7 @@ int tLuaTypeInfo::GetFuncDesc(tLuaObject* lua_obj, lua_State* L)
   lua_settable(L, -3);
 
   // gets all the names
-  tBstrArrayHolder names(pfuncdesc->cParams+1);
+  tBstrArray names(pfuncdesc->cParams+1);
   UINT found = 0;
 
   // gets the name of the functions and the names of the
@@ -769,10 +737,10 @@ int tLuaTypeInfo::GetTypeAttr(tLuaObject* lua_obj, lua_State* L)
   tLuaTypeInfo* lua_typeinfo = DYNAMIC_CAST<tLuaTypeInfo*>(lua_obj);
   CHECKPRECOND(lua_typeinfo);
 
-  TYPEATTR* ptypeattr = NULL;
-  HRESULT hr = lua_typeinfo->typeinfo->GetTypeAttr(&ptypeattr);
-  tTypeAttrHolder typeattr_holder(lua_typeinfo->typeinfo, ptypeattr);
+  tTypeAttrHolder attributes(lua_typeinfo->typeinfo);
+  HRESULT hr = lua_typeinfo->typeinfo->GetTypeAttr(attributes.out());
   CHK_COM_CODE(hr);
+  TYPEATTR *ptypeattr = attributes.get();
   CHK_LCOM_ERR(ptypeattr, "Type attributes are unavailable.");
 
   // creates table to hold type attributes

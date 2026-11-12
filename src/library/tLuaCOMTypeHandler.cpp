@@ -60,12 +60,6 @@ void callLuaFunction(lua_State* L, int arguments, int results)
     TYPECONV_ERROR(error.getBuffer() ? error.getBuffer() : "Lua conversion failed");
 }
 
-int protectedTableLookup(lua_State* L)
-{
-  lua_gettable(L, 1);
-  return 1;
-}
-
 void getLuaTableValue(lua_State* L, int index)
 {
   if(index < 0 && index > LUA_REGISTRYINDEX)
@@ -73,30 +67,13 @@ void getLuaTableValue(lua_State* L, int index)
   if(!lua_checkstack(L, 3))
     TYPECONV_ERROR("Insufficient Lua stack space for table lookup");
 
-  lua_pushcfunction(L, protectedTableLookup);
+  lua_pushcfunction(L, LuaAux::getTableValue);
   lua_pushvalue(L, index);
   lua_pushvalue(L, -3); // original key, below the function and table
   callLuaFunction(L, 2, 1);
   lua_replace(L, -2); // replace the original key with the result
 }
 
-
-class BstrArray
-{
-public:
-  BstrArray() {}
-  ~BstrArray()
-  {
-    for(size_t i = 0; i < values.size(); i++)
-      SysFreeString(values[i]);
-  }
-
-  BSTR* data() { return values.empty() ? NULL : &values[0]; }
-  void allocate(size_t count) { values.resize(count, NULL); }
-
-private:
-  std::vector<BSTR> values;
-};
 
 class VariantValue
 {
@@ -126,24 +103,6 @@ private:
   lua_State* L;
   int top;
   bool active;
-};
-
-class TypeAttrValue
-{
-public:
-  explicit TypeAttrValue(ITypeInfo* owner) : m_owner(owner), value(NULL) {}
-  ~TypeAttrValue()
-  {
-    if(value)
-      m_owner->ReleaseTypeAttr(value);
-  }
-
-  TYPEATTR** output() { return &value; }
-
-  TYPEATTR* value;
-
-private:
-  ITypeInfo* m_owner;
 };
 
 const char* numericVariantTypeName(VARTYPE vt)
@@ -450,7 +409,7 @@ struct tLuaCOMTypeHandler::ConversionContext
   std::vector<SAFEARRAYBOUND> array_bounds;
   std::vector<long> array_dimensions, array_indices;
   VariantValue array_element;
-  BstrArray record_field_names;
+  tBstrArray record_field_names;
   VariantValue record_field;
   SAFEARRAY* locked_array;
   std::exception_ptr exception;
@@ -834,8 +793,8 @@ void tLuaCOMTypeHandler::com2luaImpl(lua_State* L, ConversionContext& context)
           hr = varg.pRecInfo->GetFieldNames(&field_count, NULL);
           CHK_COM_CODE(hr);
 
-          BstrArray& field_names = context.record_field_names;
-          field_names.allocate(field_count);
+          tBstrArray& field_names = context.record_field_names;
+          field_names.resize(field_count);
           ULONG returned_count = field_count;
           hr = varg.pRecInfo->GetFieldNames(&returned_count, field_names.data());
           CHK_COM_CODE(hr);
@@ -844,12 +803,12 @@ void tLuaCOMTypeHandler::com2luaImpl(lua_State* L, ConversionContext& context)
           for(ULONG i = 0; i < returned_count; i++)
           {
             VARIANT& field = context.record_field.value;
-            hr = varg.pRecInfo->GetField(varg.pvRecord, field_names.data()[i], &field);
+            hr = varg.pRecInfo->GetField(varg.pvRecord, field_names[i], &field);
             CHK_COM_CODE(hr);
 
             // Lua allocation errors bypass local C++ destructors. Keep both
             // the copied field and its converted name in the outer context.
-            context.text = tUtil::bstr2string(field_names.data()[i]);
+            context.text = tUtil::bstr2string(field_names[i]);
             lua_pushstring(L, context.text);
             com2lua(L, field, true);
             lua_settable(L, -3);
@@ -2289,15 +2248,15 @@ TYPEDESC tLuaCOMTypeHandler::processPTR(ITypeInfo* typeinfo,
   {
     tCOMPtr<ITypeInfo> referenced_type;
     CHK_COM_CODE(typeinfo->GetRefTypeInfo(pointed_at.hreftype, &referenced_type));
-    TypeAttrValue typeattr(referenced_type);
-    CHK_COM_CODE(referenced_type->GetTypeAttr(typeattr.output()));
+    tTypeAttrHolder typeattr(referenced_type);
+    CHK_COM_CODE(referenced_type->GetTypeAttr(typeattr.out()));
 
-    if(typeattr.value->typekind == TKIND_ALIAS)
+    if(typeattr.get()->typekind == TKIND_ALIAS)
     {
       // Keep the pointer level and the alias metadata owner until the target
       // is resolved. An interface alias and an interface-pointer alias differ.
       TYPEDESC alias_pointer = tdesc;
-      alias_pointer.lptdesc = &typeattr.value->tdescAlias;
+      alias_pointer.lptdesc = &typeattr.get()->tdescAlias;
       return processPTR(referenced_type, alias_pointer);
     }
 
@@ -2353,13 +2312,13 @@ TYPEDESC tLuaCOMTypeHandler::processUSERDEFINED(ITypeInfo* typeinfo,
   if(FAILED(hr))
     TYPECONV_ERROR("Could not understand user-defined type");
 
-  TypeAttrValue typeattr(userdef);
-  hr = userdef->GetTypeAttr(typeattr.output());
+  tTypeAttrHolder typeattr(userdef);
+  hr = userdef->GetTypeAttr(typeattr.out());
 
   if(FAILED(hr))
     TYPECONV_ERROR("Could not understand user-defined type");
 
-  switch(typeattr.value->typekind)
+  switch(typeattr.get()->typekind)
   {
   case TKIND_ENUM:
     newtdesc.vt = VT_INT;
@@ -2470,16 +2429,16 @@ TYPEDESC tLuaCOMTypeHandler::processAliases(ITypeInfo* typeinfo,
   if(FAILED(hr))
     TYPECONV_ERROR("Could not understand user-defined type");
 
-  TypeAttrValue typeattr(userdef);
-  hr = userdef->GetTypeAttr(typeattr.output());
+  tTypeAttrHolder typeattr(userdef);
+  hr = userdef->GetTypeAttr(typeattr.out());
 
   if(FAILED(hr))
     TYPECONV_ERROR("Could not understand user-defined type");
 
   TYPEDESC newtdesc;
   newtdesc.vt = 0;
-  if(typeattr.value->typekind == TKIND_ALIAS)
-    newtdesc = processTYPEDESC(userdef, typeattr.value->tdescAlias);
+  if(typeattr.get()->typekind == TKIND_ALIAS)
+    newtdesc = processTYPEDESC(userdef, typeattr.get()->tdescAlias);
   else
     newtdesc = tdesc;
 

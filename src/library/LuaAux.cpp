@@ -24,6 +24,13 @@ LuaAux::~LuaAux()
 
 }
 
+// Lua callback for a protected lookup of table[key].
+int LuaAux::getTableValue(lua_State *L)
+{
+  lua_gettable(L, 1);
+  return 1;
+}
+
 /*
  * Prints the lua stack
  */

@@ -17,7 +17,7 @@ assert(string)
 assert(io)
 
 -- https://github.com/1linux/luacom/commit/7828d9c91a3a97f042a83cd7507af403e0c1d1c1
-luacomE.SAFEARRAY_PATCH = true  
+luacomE.SAFEARRAY_PATCH = true
 --
 -- ExportConstants
 --
@@ -403,7 +403,7 @@ function luacomE.DumpTypeLib(obj, htmlfile)
   --
   
   io.write("<h2>Summary</h2>\n")
-  
+
   -- Output function
   local function write_typeinfo(i, typeinfo)
     io.write("<li>")
@@ -488,14 +488,14 @@ function luacomE.DumpTypeLib(obj, htmlfile)
     
       if typeinfo.interfaces[j].source and source == nil then
         source = typeinfo.interfaces[j].dispinterface
-      elseif typeinfo.interfaces[j].source 
+      elseif typeinfo.interfaces[j].source
              and typeinfo.interfaces[j].default then
         source = typeinfo.interfaces[j].dispinterface
       end
       
       if not typeinfo.interfaces[j].source and default == nil then
         default = typeinfo.interfaces[j].dispinterface
-      elseif typeinfo.interfaces[j].default 
+      elseif typeinfo.interfaces[j].default
              and not typeinfo.interfaces[j].source then
         default = typeinfo.interfaces[j].dispinterface
       end

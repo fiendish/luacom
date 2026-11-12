@@ -324,6 +324,20 @@ STDMETHODIMP tLuaControl::FreezeEvents(BOOL fFreeze)
 */
 STDMETHODIMP tLuaControl::SetClientSite(IOleClientSite* pcs)
 {
+  if (m_pClientSite.Raw() == pcs)
+    return S_OK;
+
+  // The in-place interfaces belong to the current client site. A control can
+  // be detached and rehosted during normal container operation, so release
+  // every old-site reference before publishing the replacement.
+  if (m_fInPlaceActive) {
+    HRESULT hr = this->InPlaceDeactivate();
+    if (FAILED(hr)) return hr;
+  }
+  m_pInPlaceSite.Release();
+  m_pInPlaceFrame.Release();
+  m_pInPlaceUIWindow.Release();
+  m_hwndParent = NULL;
   m_pControlSite.Release();
 
   m_pClientSite.Attach(pcs);
